@@ -81,3 +81,11 @@ Supporting choices in the same table:
 - `txn_time` and `created_at` kept separate — when the money moved vs. when the row appeared. Scanning Friday's SMS on Sunday must not report Sunday's spending.
 - `card_id` with no `ON DELETE` clause — the default blocks deleting a card that still has history, so spending records can't vanish with the card.
 - `payment_method` deliberately left unconstrained until Phase 3 reveals the real value set from live SMS formats.
+
+## 012 — Duplicate upi_ref is a success (200), not a conflict (409)
+
+**Context:** `on conflict (upi_ref) do nothing` returns no row when it collides. `POST /transactions` had to decide what that means to the caller.
+**Decision:** Fetch and return the existing row. 201 when a row was created, 200 when it already existed. Never an error.
+**Why:** The Phase 3 SMS parser re-scans the inbox on every app open, so re-sending an already-stored transaction is the *normal* path, not a failure. A 409 would force the client to treat an error status as success — which means the day a real error appears, it gets swallowed by the same branch. Making the endpoint idempotent keeps "did this fail?" answerable.
+**Trade-off:** A conflict costs a second query (the insert returns nothing, then a select by `upi_ref` fetches the row). Only on the conflict path, and only one indexed lookup. The alternative — `do update set upi_ref = excluded.upi_ref` to force `returning` to yield a row — avoids the round trip but writes a dead tuple and takes a row lock on every duplicate, which is worse at re-scan volume.
+**Note:** Rows with a NULL `upi_ref` (cash, manual entry) never conflict — Postgres treats NULLs as distinct — so this path only ever triggers for real UPI references.
