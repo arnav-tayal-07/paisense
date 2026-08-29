@@ -6,12 +6,12 @@ Run from the backend/ folder:
 Interactive docs once it's up: http://127.0.0.1:8000/docs
 """
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from psycopg.errors import ForeignKeyViolation
 
 from .db import get_conn
 from .models import TransactionIn
-from .transactions import create_transaction
+from .transactions import create_transaction, list_transactions
 
 app = FastAPI(title="PaiSense API")
 
@@ -51,6 +51,13 @@ def post_transaction(txn: TransactionIn, response: Response):
     return row
 
 
-# --- Yours to write: GET /transactions ---
-#
-# List recent transactions, newest first. Notes in the chat.
+@app.get("/transactions")
+def get_transactions(
+    # A plain argument with a default becomes a query parameter: ?limit=20.
+    # le=200 caps it, so ?limit=999999 is rejected with a 422 rather than
+    # dragging the whole table across the wire once this is real data.
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Recent transactions, newest first by txn_time."""
+    with get_conn() as conn:
+        return list_transactions(conn, limit)

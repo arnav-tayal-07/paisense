@@ -59,3 +59,14 @@ def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool
 
     existing = conn.execute(_SELECT_BY_REF, (txn.upi_ref,)).fetchone()
     return existing, False
+
+
+_SELECT_RECENT = """
+select * from transactions
+order by txn_time desc
+limit %s
+"""
+
+def list_transactions(conn: Connection, limit: int) -> list[dict]:
+
+    return conn.execute(_SELECT_RECENT, (limit,)).fetchall()
