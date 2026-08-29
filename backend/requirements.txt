@@ -1,0 +1,6 @@
+# Pinned so Render installs exactly what works locally.
+# Regenerate with: .venv\Scripts\python.exe -m pip freeze
+fastapi==0.141.1
+uvicorn==0.52.4
+psycopg[binary]==3.3.4
+python-dotenv==1.2.3
