@@ -52,3 +52,10 @@ Format: context → decision → why → what we gave up.
 
 **Decision:** Phase 4 builds the agent with a text interface; voice is layered on in Phase 6.
 **Why:** The agent is modality-agnostic — it receives text either way. Debugging the agent, tools, and voice simultaneously multiplies pain. Text box stays as fallback even in the final app (STT will mangle merchant names sometimes).
+
+## 009 — Gemini free tier for the agent during development
+
+**Context:** Anthropic has no free tier; wanted a ₹0 way to build and test the agent.
+**Decision:** Develop the agent on Google Gemini Flash (free tier, supports function calling). Keep the provider behind one small interface so switching (e.g., to Claude for tool-use quality + no-training-on-data policy) is a one-file change.
+**Why:** Free tier covers hundreds of requests/day — plenty for development. Test data is fake, so the free tier's "may use prompts for product improvement" clause doesn't matter yet.
+**Trade-off:** Revisit before real financial data flows daily: either paid tier or Claude, for privacy and better multi-step tool chaining.
