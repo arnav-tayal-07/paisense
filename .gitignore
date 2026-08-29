@@ -19,3 +19,6 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local chat archives — personal record, never push
+chat-archive/
