@@ -1,4 +1,6 @@
-# Kharcha — automatic UPI expense manager
+# PaiSense — every paisa, accounted for, sensibly
+
+*From "pai-pai ka hisaab" — keeping account of every last penny.*
 
 A personal expense manager that logs UPI spends **automatically** (no manual entry), tracks income and credit cards, computes card due dates with reminders, and is controlled by a **voice agent** that acts as a proper tally keeper.
 
