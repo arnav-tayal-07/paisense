@@ -20,32 +20,22 @@
 | Supabase project | ✅ `paisense`, region Mumbai, Data API disabled, RLS on |
 | `backend/.env` with DATABASE_URL | ✅ exists locally (session pooler string), connection tested OK, git-ignored |
 | Python venv | ✅ `backend/.venv` — fastapi, uvicorn, psycopg[binary], python-dotenv |
-| `cards` table | ✅ created in Supabase (via SQL editor, RLS enabled) — see below |
-| `transactions` table | ❌ **NEXT STEP — Arnav owes a draft** (see below) |
-| `backend/schema.sql` | ❌ must be created to mirror what runs in Supabase (repo = source of truth) |
+| `cards` table | ✅ created in Supabase (via SQL editor, RLS enabled) |
+| `transactions` table | ✅ created in Supabase, verified — see [schema.sql](../backend/schema.sql) and ADR 011 |
+| `backend/schema.sql` | ✅ complete and verified against the live DB — both tables, indexes, RLS |
 | FastAPI app code | ❌ not started (backend/app/ is empty) |
 
 ## The exact next step
 
-Arnav was asked to draft `CREATE TABLE transactions` himself and paste it for review BEFORE running it. Do not write it for him. The agreed design:
+Phase 2: the expense/income API. **Arnav writes the routes and the SQL** — he knows FastAPI and raw SQL basics. Assistant writes app wiring/config only.
 
-- Columns: `id, type, amount, merchant, category, txn_time, upi_ref, payment_method, card_id, source, note, created_at`
-- Already taught: identity PK, `numeric(12,2)` for money (never float), `timestamptz` for txn_time, `unique` nullable `upi_ref` (dedupe for SMS re-scans via ON CONFLICT DO NOTHING), `check (type in ('expense','income'))`, `card_id references cards(id)`, cards-before-transactions ordering.
-- Review hardest: his `not null` choices (amount/type/txn_time must be not null; merchant/category/upi_ref/card_id/note nullable).
+Schema state is fully settled as of 2026-08-29: both tables exist in Supabase, `schema.sql` mirrors them exactly (verified column-by-column and via `pg_class`), both have RLS enabled with **zero policies**.
 
-The `cards` table already in Supabase (mirror into schema.sql):
+RLS gotcha to remember: policy-less RLS is deny-all, but the backend connects as the table owner through the session pooler and owners bypass RLS — so it works today. If the Data API is ever re-enabled or a non-owner role is used, both tables read as empty rather than erroring. Fails silent, not loud.
 
-```sql
-create table cards (
-  id             bigint generated always as identity primary key,
-  name           text not null,
-  last4          char(4),
-  statement_day  int not null check (statement_day between 1 and 31),
-  due_days_after int not null default 20,
-  credit_limit   numeric(12, 2),
-  created_at     timestamptz not null default now()
-);
-```
+## Session note (2026-08-29, second session)
+
+The transactions table was handed over as finished code rather than written by Arnav. He was walked through `id` (got it right unaided), then stalled on `type`/`amount`, was offered three ways forward, and chose "just give me the code" after one push-back. That was his call and the right thing to respect — but it means **the nullability reasoning in ADR 011 is not yet his**. Worth re-testing in Phase 2: ask him to justify a `not null` choice on a new column before accepting it. Hold the pair-mode line on routes and regexes.
 
 ## Phase plan (currently mid-Phase 1/2)
 

@@ -64,3 +64,20 @@ Format: context → decision → why → what we gave up.
 
 **Decision:** The app is called PaiSense (working name was Kharcha).
 **Why:** Double meaning — "pai" (the old smallest rupee unit, as in *pai-pai ka hisaab*, accounting for every last penny) + "sense" (making sense of your money). Checked Play Store / web presence: no existing app uses it. First choice "Munshi" was already taken twice on the Play Store; "TallyBaba" risks the Tally Solutions trademark; plain kharcha/paisa names are crowded.
+
+## 011 — transactions table: permissive nullability, strict on the core four
+
+**Context:** Designing `CREATE TABLE transactions`. The open question was which columns get `not null`.
+**Decision:** Only `type`, `amount`, `txn_time`, `created_at` (plus `id`, `source`, which defaults) are `not null`. `merchant`, `category`, `upi_ref`, `payment_method`, `card_id`, `note` are nullable.
+**Why:** The test applied per column was "can a real transaction exist without this?", not "should this be filled in?". A half-parsed bank SMS with an amount but no clean merchant name is still a transaction worth storing — a `not null` on `merchant` would make the Phase 3 parser reject real spending. Direction, amount, and time are the irreducible core: without them there is no row worth keeping.
+**Trade-off:** More null-handling in Phase 2 query code and in the app's display layer. Accepted: rejecting real data is worse than handling nulls.
+
+Supporting choices in the same table:
+
+- `amount numeric(12,2) check (amount > 0)` — `type` carries the direction, so a negative amount would double-encode sign and could silently cancel out real spend in monthly totals.
+- `type text check (...)` rather than a native Postgres enum — adding a third value later is one line instead of an `ALTER TYPE` migration.
+- `upi_ref text unique` and nullable — Postgres treats NULLs as distinct, so unlimited cash rows coexist while a re-scanned SMS collides on its ref and is dropped by `ON CONFLICT (upi_ref) DO NOTHING`. This one column is the entire dedupe strategy.
+- `source` (`manual`/`sms`/`agent`), not null with a default — every row has a provenance; lets later code trust SMS rows and re-check agent-written ones.
+- `txn_time` and `created_at` kept separate — when the money moved vs. when the row appeared. Scanning Friday's SMS on Sunday must not report Sunday's spending.
+- `card_id` with no `ON DELETE` clause — the default blocks deleting a card that still has history, so spending records can't vanish with the card.
+- `payment_method` deliberately left unconstrained until Phase 3 reveals the real value set from live SMS formats.

@@ -14,6 +14,12 @@ create table cards (
   created_at     timestamptz not null default now()
 );
 
+-- RLS on, no policies. Deny-all for the anon/authenticated roles; the backend
+-- connects as the table owner via the session pooler, and owners bypass RLS.
+-- If the Data API is ever re-enabled, this table reads as EMPTY until policies
+-- exist — it fails silent, not loud. Verified enabled in Supabase 2026-08-29.
+alter table cards enable row level security;
+
 -- Every expense and income row. References cards, so it comes after it.
 create table transactions (
   id              bigint generated always as identity primary key,
