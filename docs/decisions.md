@@ -89,3 +89,19 @@ Supporting choices in the same table:
 **Why:** The Phase 3 SMS parser re-scans the inbox on every app open, so re-sending an already-stored transaction is the *normal* path, not a failure. A 409 would force the client to treat an error status as success — which means the day a real error appears, it gets swallowed by the same branch. Making the endpoint idempotent keeps "did this fail?" answerable.
 **Trade-off:** A conflict costs a second query (the insert returns nothing, then a select by `upi_ref` fetches the row). Only on the conflict path, and only one indexed lookup. The alternative — `do update set upi_ref = excluded.upi_ref` to force `returning` to yield a row — avoids the round trip but writes a dead tuple and takes a row lock on every duplicate, which is worse at re-scan volume.
 **Note:** Rows with a NULL `upi_ref` (cash, manual entry) never conflict — Postgres treats NULLs as distinct — so this path only ever triggers for real UPI references.
+
+## 013 — Filtering built as composed SQL fragments, not a query builder
+
+**Context:** `GET /transactions` needed optional filters (type, category, merchant, date range) that combine freely. Phase 4's agent tools map onto exactly these.
+**Decision:** Build the `where` clause by joining hard-coded SQL fragments whose values are still passed as `%s` parameters. No ORM, no query-builder library.
+**Why:** The rule "never f-string SQL" is really "never interpolate *values*". Fragments like `"type = %s"` are literals written in the source; the user's value never touches the string and travels separately to psycopg. That keeps injection impossible while allowing the clause to vary. An ORM would solve this too, but adds a dependency and an abstraction layer for one query on a two-table schema.
+**Trade-off:** Adding a filter means editing a list in `list_transactions` rather than getting it for free. Fine at this size; revisit if the filter set grows past a handful.
+
+**Date ranges are half-open** — `start <= txn_time < end`, not `<=` on both ends. Asking for August then September with inclusive bounds double-counts anything landing exactly on the boundary instant. The agent will generate these ranges programmatically for `monthly_total`, so the off-by-one would be systematic rather than rare.
+
+## 014 — Missing row is a 404, even though a duplicate is a 200
+
+**Context:** `DELETE /transactions/{id}` and `GET /transactions/{id}` had to decide what "not found" means. ADR 012 had just established that a *duplicate* is a success.
+**Decision:** 404 when the id doesn't exist. 204 No Content on a successful delete.
+**Why:** These look contradictory but aren't. A duplicate `upi_ref` is the expected steady state of a re-scanning parser — it means "already handled", which is success. A missing id means the caller referred to something that isn't there, which is a real mistake worth surfacing. The agent's `delete_expense` tool needs to distinguish "removed it" from "there was nothing to remove" so it can say so rather than claim a deletion that never happened.
+**Implementation note:** `delete ... returning id` is what makes this possible — a bare `DELETE` reports success whether or not it matched anything.

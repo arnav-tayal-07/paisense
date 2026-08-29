@@ -6,6 +6,8 @@ this phase's route calls. One insert path, two entry points, no duplicated
 ON CONFLICT handling.
 """
 
+from datetime import datetime
+
 from psycopg import Connection
 
 from .models import TransactionIn
@@ -61,12 +63,70 @@ def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool
     return existing, False
 
 
-_SELECT_RECENT = """
-select * from transactions
-order by txn_time desc
-limit %s
-"""
+def list_transactions(
+    conn: Connection,
+    limit: int,
+    *,
+    txn_type: str | None = None,
+    category: str | None = None,
+    merchant: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict]:
+    """Transactions matching the given filters, newest first.
 
-def list_transactions(conn: Connection, limit: int) -> list[dict]:
+    Every filter is optional; passing none of them returns the most recent
+    `limit` rows. Phase 4's agent tools map onto this directly — monthly_total
+    is start/end, search is merchant.
+    """
+    # Each entry pairs a SQL fragment with its value. The fragments are
+    # hard-coded strings written here; only the values are user input, and
+    # those still travel as %s parameters. That distinction is what keeps the
+    # f-string below safe — see ADR 013.
+    filters = [
+        ("type = %s", txn_type),
+        ("category = %s", category),
+        # ilike = case-insensitive LIKE. Wrapping in % makes it a contains
+        # match, so "zom" finds "Zomato".
+        ("merchant ilike %s", f"%{merchant}%" if merchant else None),
+        # Half-open interval: start <= txn_time < end. Using <= on both ends
+        # would double-count a transaction landing exactly at midnight on the
+        # boundary when the agent asks for two consecutive months.
+        ("txn_time >= %s", start),
+        ("txn_time < %s", end),
+    ]
 
-    return conn.execute(_SELECT_RECENT, (limit,)).fetchall()
+    conditions = [sql for sql, value in filters if value is not None]
+    params = [value for _, value in filters if value is not None]
+
+    where = f"where {' and '.join(conditions)}" if conditions else ""
+
+    # txn_time desc, not id — id is insertion order, so an SMS scanned on
+    # Sunday for a Friday purchase would surface as if it had just happened.
+    query = f"""
+        select * from transactions
+        {where}
+        order by txn_time desc
+        limit %s
+    """
+    params.append(limit)
+
+    return conn.execute(query, params).fetchall()
+
+
+_SELECT_BY_ID = "select * from transactions where id = %s"
+
+
+def get_transaction(conn: Connection, txn_id: int) -> dict | None:
+    """One transaction by id, or None if there's no such row."""
+    return conn.execute(_SELECT_BY_ID, (txn_id,)).fetchone()
+
+
+# `returning id` is what makes this tell the difference between "deleted one
+# row" and "there was nothing to delete". A bare DELETE succeeds either way.
+_DELETE_BY_ID = "delete from transactions where id = %s returning id"
+
+
+def delete_transaction(conn: Connection, txn_id: int) -> bool:
+    """Delete one transaction. Returns True if a row was actually removed."""
+    return conn.execute(_DELETE_BY_ID, (txn_id,)).fetchone() is not None

@@ -23,22 +23,34 @@
 | `cards` table | ✅ created in Supabase (via SQL editor, RLS enabled) |
 | `transactions` table | ✅ created in Supabase, verified — see [schema.sql](../backend/schema.sql) and ADR 011 |
 | `backend/schema.sql` | ✅ complete and verified against the live DB — both tables, indexes, RLS |
-| FastAPI app code | 🟡 running — `/health`, `POST /transactions`, `GET /transactions`. See below for gaps |
+| FastAPI app code | ✅ Phase 2 complete — `/health` + full transactions CRUD, all verified against the live DB |
 
 Run it from `backend\`: `.\.venv\Scripts\uvicorn.exe app.main:app --reload`, then http://127.0.0.1:8000/docs
 (PowerShell needs the leading `.\` and you must be in `backend\`, not the repo root.)
 
 Files: [db.py](../backend/app/db.py) connection, [models.py](../backend/app/models.py) Pydantic, [transactions.py](../backend/app/transactions.py) SQL, [main.py](../backend/app/main.py) routes.
 
+## The API as it stands
+
+| Route | Behaviour |
+|---|---|
+| `GET /health` | server + DB reachability |
+| `POST /transactions` | 201 created, 200 + existing row on duplicate `upi_ref` (ADR 012), 400 on bad `card_id`, 422 on bad type/amount |
+| `GET /transactions` | newest first by `txn_time`; optional `type`, `category`, `merchant` (partial, case-insensitive), `start`, `end`; `limit` 1–200 default 50 |
+| `GET /transactions/{id}` | one row, 404 if absent |
+| `DELETE /transactions/{id}` | 204 on success, 404 if absent (ADR 014) |
+
+Phase 4's agent tools map straight onto the GET filters: `monthly_total` is `start`/`end`, `search` is `merchant`.
+
 ## The exact next step
 
-Finish Phase 2. Three routes missing, in priority order:
+**Phase 3 — the SMS parser.** Arnav supplies real anonymized bank SMS; he writes the regexes. New endpoint `POST /sms` takes raw message text, parses it into a `TransactionIn`, and calls the existing `create_transaction()` — the dedupe is already built and tested, so re-scanning the inbox is safe from day one. Regexes live server-side (ADR 001) so a bank changing its format doesn't need a new APK.
 
-1. **Filtering on `GET /transactions`** — the big one. No way to ask for "this month", "only expenses", or "only Zomato". Phase 4's agent needs `monthly_total` and `search` as tools and both land here as query params. Building the agent before this exists means building it twice.
-2. **`DELETE /transactions/{id}`** — the agent's `delete_expense` tool needs it. Small, and it forces the first question the API hasn't had to answer: what to return when the row doesn't exist.
-3. **`GET /transactions/{id}`** — single row.
+**Carried debt, deal with it before Phase 5 deploy:**
 
-Also outstanding: no tests at all (everything so far verified by hand in `/docs`), and `POST` shows "Undocumented" next to its 201 because the status is set dynamically rather than declared — cosmetic, fix with `responses={...}`.
+- **No tests.** Everything to date was verified by hand or by throwaway scripts. There is no regression net, and Phase 3 will be editing these exact routes.
+- `POST` shows "Undocumented" beside its 201 because the status is set dynamically rather than declared — cosmetic, fix with `responses={...}`.
+- No `PATCH` — a transaction can be created and deleted but not corrected.
 
 ## Schema state — settled, don't revisit
 
@@ -60,10 +72,10 @@ Test data currently in `transactions`: 2 rows (ids 1 and 2, Zomato and Auto). De
 
 **How to run the rule (updated):** "never hand over finished code" is the default, not an absolute. Push back **once**, briefly, with a concrete alternative — then do what he picks without arguing again. Repeated refusal is friction, not teaching. He does engage when the target is small and unambiguous (three named blanks worked; a blank page did not). Prefer worked-example-then-parallel-task over blank-page assignments. Avoid `...` and `???` as blanks — he pasted them literally as code, reasonably.
 
-## Phase plan (currently mid-Phase 2)
+## Phase plan (Phase 3 next)
 
 1. ✅ Backend skeleton + DB connection + schema — done and verified
-2. 🟡 Expense/income API — POST and GET done; filtering, DELETE and single-row GET remain
+2. ✅ Expense/income API — full CRUD with filtering, verified against the live DB
 3. SMS parser — he supplies real anonymized bank SMS; he writes regexes; dedupe by upi_ref
 4. Agent — **Gemini Flash free tier** (ADR 009), function calling, tools: add/delete/search expenses, monthly totals, income, card spends, dues. Provider behind a swappable interface. Text chat first.
 5. Deploy — Render free tier (backend) + this Supabase DB
