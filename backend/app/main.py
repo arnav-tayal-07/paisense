@@ -67,9 +67,12 @@ def get_transactions(
     limit: int = Query(default=50, ge=1, le=200),
     # alias="type" keeps the query parameter named ?type= while the Python
     # argument avoids shadowing the built-in `type`.
-    txn_type: Literal["expense", "income"] | None = Query(default=None, alias="type"),
+    txn_type: Literal["expense", "income", "card_payment"] | None = Query(
+        default=None, alias="type"
+    ),
     category: str | None = None,
     merchant: str | None = Query(default=None, description="Case-insensitive partial match"),
+    card_id: int | None = Query(default=None, description="Spend on one card"),
     start: datetime | None = Query(default=None, description="Inclusive lower bound on txn_time"),
     end: datetime | None = Query(default=None, description="Exclusive upper bound on txn_time"),
 ):
@@ -86,6 +89,7 @@ def get_transactions(
             txn_type=txn_type,
             category=category,
             merchant=merchant,
+            card_id=card_id,
             start=start,
             end=end,
         )

@@ -105,3 +105,30 @@ Supporting choices in the same table:
 **Decision:** 404 when the id doesn't exist. 204 No Content on a successful delete.
 **Why:** These look contradictory but aren't. A duplicate `upi_ref` is the expected steady state of a re-scanning parser — it means "already handled", which is success. A missing id means the caller referred to something that isn't there, which is a real mistake worth surfacing. The agent's `delete_expense` tool needs to distinguish "removed it" from "there was nothing to remove" so it can say so rather than claim a deletion that never happened.
 **Implementation note:** `delete ... returning id` is what makes this possible — a bare `DELETE` reports success whether or not it matched anything.
+
+---
+
+*ADRs 015–017 all come from reading two real SMS (Axis `AX-AXISBK-S`, Amex `TX-AMEXIN-S`) before writing any regex. Each one invalidated an assumption baked into the schema on day one. Applied together as migration [001](../backend/migrations/001_credit_card_sms.sql).*
+
+## 015 — `last4` is text with a 4–6 digit check, not `char(4)`
+
+**Context:** The `cards` table assumed every card shows four trailing digits.
+**Decision:** `last4 text check (last4 ~ '^[0-9]{4,6}$')`.
+**Why:** Amex is a 15-digit card and its SMS shows **five** — `***71003`. `char(4)` physically cannot store that, so an Amex card could never be added. `char` also blank-pads to a fixed width, which makes later equality comparisons quietly surprising. `text` plus a shape check keeps the validation without the width.
+**Trade-off:** The check no longer pins an exact length, so a typo of five digits on a Visa passes. Acceptable — the alternative excludes a card you actually own.
+
+## 016 — Credit card bill payments are a third type, not income
+
+**Context:** The Amex message is *"a payment of INR 3,230.00 was received on your Amex Card"* — paying off the card, not spending or earning.
+**Decision:** Add `card_payment` to the `type` check. Excluded from both spend and income totals.
+**Why:** Recording it as income inflates earnings by an amount that was never earned. Recording it as an expense double-counts, because every purchase it settles was already logged as an expense when the card was swiped. It is a transfer between two accounts the user owns. Dropping the message entirely was the other option, rejected because Phase 6's due-date reminders need to know a bill was actually paid.
+**Trade-off:** Every future total, filter, and agent tool must remember to exclude `card_payment`. That's a standing footgun — the mitigation is that it's recorded here and the type name says what it is.
+**Note:** ADR 011 justified `text` + `check` over a native enum on the grounds that a third value would one day be one line rather than a migration. That happened within two days.
+
+## 017 — Dedupe moves from `upi_ref` to a derived `dedupe_key`
+
+**Context:** ADR 011 made `upi_ref` the entire dedupe strategy. Neither real credit card SMS contains a transaction reference of any kind.
+**Decision:** Add `dedupe_key text unique`, derived by the parser from bank + card + timestamp + amount. `upi_ref` keeps its data but **loses its unique constraint**.
+**Why:** With no reference in the message, `upi_ref` is null, and Postgres treats every null as distinct — so re-scanning the inbox would insert the same card transaction again on every app open. A derived key restores the property ADR 012 depends on. Deriving rather than reading is the key move: the parser can always construct one, whatever the bank sends.
+**Why `upi_ref` loses unique:** two unique constraints would be a trap. `on conflict (dedupe_key) do nothing` only swallows collisions on the column it names — a `upi_ref` collision would raise and surface as a 500 rather than being ignored. Dedupe must be exactly one column's job.
+**Trade-off:** A derived key is only as good as its inputs. Two identical amounts on the same card in the same second would collapse into one row. Judged impossible in practice; if a bank ever sends a reference, prefer it over the derived key.

@@ -7,7 +7,9 @@
 create table cards (
   id             bigint generated always as identity primary key,
   name           text not null,
-  last4          char(4),
+  -- 4-6 digits, not char(4): Amex shows five (***71003). text rather than
+  -- char also avoids blank-padding surprises in comparisons.
+  last4          text check (last4 ~ '^[0-9]{4,6}$'),
   statement_day  int not null check (statement_day between 1 and 31),
   due_days_after int not null default 20,
   credit_limit   numeric(12, 2),
@@ -26,8 +28,12 @@ create table transactions (
 
   -- Direction of the money. text + check, not a native enum: adding a third
   -- value later is one line here, vs. an ALTER TYPE migration with an enum.
+  -- (Which promptly happened — card_payment was added in migration 001.)
+  -- card_payment = paying off a credit card bill. Neither spending nor
+  -- earnings: the purchases it settles were already logged as expenses.
+  -- Excluded from both totals; stored because due-date reminders need it.
   -- No default — a row that can't say which way the money went isn't a transaction.
-  type            text not null check (type in ('expense', 'income')),
+  type            text not null check (type in ('expense', 'income', 'card_payment')),
 
   -- numeric, never float: 0.1 + 0.2 must equal 0.3 when it's someone's money.
   -- 12 digits, 2 decimal = up to 9,999,999,999.99. Always positive; `type`
@@ -47,11 +53,18 @@ create table transactions (
   -- Defaults to now() for manual entry; the SMS parser passes the real time.
   txn_time        timestamptz not null default now(),
 
-  -- The dedupe key. Nullable because cash and manual entries have no UPI ref.
-  -- unique + nullable is the trick: Postgres treats NULLs as distinct, so any
-  -- number of cash rows coexist, while a re-scanned SMS collides on its ref
-  -- and gets dropped by ON CONFLICT (upi_ref) DO NOTHING.
-  upi_ref         text unique,
+  -- Real bank reference when the message carries one. NOT unique any more:
+  -- dedupe is dedupe_key's job alone, and a second unique constraint would
+  -- raise instead of being swallowed by ON CONFLICT (dedupe_key).
+  upi_ref         text,
+
+  -- What dedupe actually runs on. DERIVED by the parser, not read from the
+  -- message — credit card SMS carry no reference at all, so the key is built
+  -- from bank + card + timestamp + amount. Nullable: manual entries have no
+  -- natural key, and Postgres treats NULLs as distinct, so any number of
+  -- them coexist while a re-scanned SMS collides and is dropped by
+  -- ON CONFLICT (dedupe_key) DO NOTHING.
+  dedupe_key      text unique,
 
   -- 'upi' | 'card' | 'cash' | 'netbanking' etc. Left unconstrained for now:
   -- you don't yet know the full set your SMS formats will produce.
@@ -71,6 +84,12 @@ create table transactions (
 
   -- Free text, always optional.
   note            text,
+
+  -- The card's available limit as reported by the SMS at that moment. On
+  -- transactions rather than cards: a column on cards would be one stale
+  -- number, whereas the newest row per card gives the current figure and
+  -- keeps the history. Null for anything that isn't a card SMS.
+  avl_limit       numeric(12, 2),
 
   -- When the ROW appeared, not when the money moved. Separate from txn_time:
   -- scanning Friday's SMS on Sunday gives txn_time = Friday, created_at = Sunday.

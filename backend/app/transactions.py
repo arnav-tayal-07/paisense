@@ -18,22 +18,22 @@ from .models import TransactionIn
 _INSERT = """
 insert into transactions
   (type, amount, merchant, category, txn_time,
-   upi_ref, payment_method, card_id, source, note)
+   upi_ref, dedupe_key, payment_method, card_id, source, note, avl_limit)
 values
   (%s, %s, %s, %s, coalesce(%s, now()),
-   %s, %s, %s, %s, %s)
-on conflict (upi_ref) do nothing
+   %s, %s, %s, %s, %s, %s, %s)
+on conflict (dedupe_key) do nothing
 returning *
 """
 
-_SELECT_BY_REF = "select * from transactions where upi_ref = %s"
+_SELECT_BY_DEDUPE_KEY = "select * from transactions where dedupe_key = %s"
 
 
 def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool]:
     """Insert a transaction. Returns (row, created).
 
-    created=False means this upi_ref was already in the table and the existing
-    row is being returned untouched — the SMS re-scan case.
+    created=False means this dedupe_key was already in the table and the
+    existing row is being returned untouched — the SMS re-scan case.
     """
     params = (
         txn.type,
@@ -45,10 +45,12 @@ def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool
         # so a laptop with a wrong clock can't write a wrong txn_time.
         txn.txn_time,
         txn.upi_ref,
+        txn.dedupe_key,
         txn.payment_method,
         txn.card_id,
         txn.source,
         txn.note,
+        txn.avl_limit,
     )
 
     row = conn.execute(_INSERT, params).fetchone()
@@ -59,7 +61,9 @@ def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool
     if row is not None:
         return row, True
 
-    existing = conn.execute(_SELECT_BY_REF, (txn.upi_ref,)).fetchone()
+    # Only reachable when dedupe_key collided — a NULL key can't conflict,
+    # because Postgres treats every NULL as distinct.
+    existing = conn.execute(_SELECT_BY_DEDUPE_KEY, (txn.dedupe_key,)).fetchone()
     return existing, False
 
 
@@ -70,6 +74,7 @@ def list_transactions(
     txn_type: str | None = None,
     category: str | None = None,
     merchant: str | None = None,
+    card_id: int | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> list[dict]:
@@ -89,6 +94,9 @@ def list_transactions(
         # ilike = case-insensitive LIKE. Wrapping in % makes it a contains
         # match, so "zom" finds "Zomato".
         ("merchant ilike %s", f"%{merchant}%" if merchant else None),
+        # Spend per card. The SMS gives a last4 string; the parser resolves
+        # that to a card_id, so filtering happens on the foreign key.
+        ("card_id = %s", card_id),
         # Half-open interval: start <= txn_time < end. Using <= on both ends
         # would double-count a transaction landing exactly at midnight on the
         # boundary when the agent asks for two consecutive months.
