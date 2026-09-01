@@ -1,7 +1,7 @@
 # Session handoff — continue here
 
 > **For any AI assistant picking this project up: read this file, then [decisions.md](decisions.md), before doing anything.**
-> Last updated: 2026-08-30 (end of the Phase 2 session — schema done, POST + GET working).
+> Last updated: 2026-08-30 (Phase 2 complete, migration 001 applied, Phase 3 approach **under review — see Open decisions**).
 
 ## The one rule that overrides everything
 
@@ -42,9 +42,47 @@ Files: [db.py](../backend/app/db.py) connection, [models.py](../backend/app/mode
 
 Phase 4's agent tools map straight onto the GET filters: `monthly_total` is `start`/`end`, `search` is `merchant`.
 
-## The exact next step
+## ⚠️ Open decisions — resolve these BEFORE writing any parser code
 
-**Phase 3 — the SMS parser.** Arnav supplies real anonymized bank SMS; he writes the regexes. New endpoint `POST /sms` takes raw message text, parses it into a `TransactionIn`, and calls the existing `create_transaction()` — the dedupe is already built and tested, so re-scanning the inbox is safe from day one. Regexes live server-side (ADR 001) so a bank changing its format doesn't need a new APK.
+Phase 3 stalled deliberately on an architecture question Arnav raised: *"why don't we find a universal way that works on any bank, any format, and needs no updating?"* That is a fair objection and regexes cannot meet it — a regex encodes a format and breaks when the format changes.
+
+**Do not just fill in the regex stubs in [app/sms.py](../backend/app/sms.py).** They exist as scaffolding from before this question came up. The approach is genuinely unsettled.
+
+Options discussed, with the trade-offs:
+
+| Approach | Universal? | Survives reformat? | Privacy |
+|---|---|---|---|
+| Per-bank regex | No | No — fails silently | Nothing leaves the server |
+| LLM extraction | Yes | Yes | Every message goes to a provider |
+| **Regex + LLM fallback** | Yes | Yes | Known banks stay local; only unknown formats go out |
+
+**Assistant's recommendation: the hybrid.** Regexes handle Axis and Amex locally — free, instant, private. Anything unrecognised, including Axis after a reformat, falls through to the LLM and keeps working. That makes regex maintenance *optional* rather than mandatory, which was Arnav's actual objection.
+
+Three unresolved questions:
+
+1. **Hybrid or LLM-only?**
+2. **Free tier or a no-training paid tier?** ADR 009 accepted Gemini free tier's "prompts may be used for product improvement" clause *explicitly because test data was fake*. Real bank SMS is the case it was not accepted for. At ~600 messages/month the paid cost is pennies, so cost is not the deciding factor. **Suggested split: free tier for development with fake fixtures, no-training tier before the first real SMS.** The risk is drift — "we'll switch later" becoming "we forgot".
+3. **Which provider?** Phase 4's agent needs the same client, so decide once.
+
+Arnav also asked whether a separate Google account fixes the privacy issue. It does not — the terms attach to the tier, not the identity, and account creation wants a phone number anyway. Worth doing for credential hygiene (blast radius if a key leaks), not as a privacy fix.
+
+## Also agreed but not built: `raw_sms` table
+
+Store every incoming message — sender, body, received-at, nullable FK to the transaction it produced. Needed under **every** option above. It turns a format change from data loss into a backlog: messages are never lost, the regex or prompt gets fixed later, and re-parsing is safe because `dedupe_key` collides on anything already inserted. Also gives a `GET /sms/unparsed` early-warning list. Migration not yet written.
+
+## Phase 3 shape, once the above is settled
+
+`POST /sms` takes `{sender, message}`, stores the raw message, extracts a `TransactionIn`, and calls the existing `create_transaction()`. Dedupe already works on `dedupe_key` (tested), so re-scanning the inbox is safe from day one. Extraction happens server-side (ADR 001) so a bank changing format doesn't need a new APK.
+
+**Route on the sender header, not the body.** `AX-AXISBK-S`, `TX-AMEXIN-S` — the DLT header is registered and stable, and Amex's message never names the bank at all. `HANDLERS` in `sms.py` matches the middle segment, so `AX-AXISBK-S` and `VM-AXISBK-S` both resolve to Axis.
+
+**Real message formats observed** (values altered in the committed fixtures — the repo is public):
+
+- Axis spend: five lines, `Spent INR 845` / `Axis Bank Card no. XX7851` / `27-08-26 17:31:03 IST` / merchant on its own line / `Avl Limit: INR ...`
+- Amex payment: one line, `INR 3,230.00`, `***71003` (**five** digits), `29/08/2026`, no time, no merchant
+- Differences that matter: comma-vs-no-comma amounts, `DD-MM-YY` vs `DD/MM/YYYY`, time present vs absent
+
+**Non-transaction messages must return `None`.** OTPs and marketing arrive on the same sender header. `check_sms.py` includes an OTP case that must be ignored — a parser that matches too loosely writes junk that surfaces weeks later as a mystery expense.
 
 **Carried debt, deal with it before Phase 5 deploy:**
 
@@ -69,6 +107,8 @@ Test data currently in `transactions`: 2 rows (ids 1 and 2, Zomato and Auto). De
 **2026-08-29 (schema session).** The transactions table was handed over as finished code rather than written by Arnav. He was walked through `id` (got it right unaided), stalled on `type`/`amount`, was offered three ways forward, and chose "just give me the code" after one push-back. **The nullability reasoning in ADR 011 is therefore not yet his.**
 
 **2026-08-30 (Phase 2 session).** Same pattern, with a real win at the end. `POST /transactions`, the Pydantic models and the insert were written by the assistant as an annotated worked example at his request. He then wrote `list_transactions` himself — including choosing `txn_time desc` over `id` and getting the `(limit,)` tuple and `.fetchall()` right. The `GET` route wrapper was assistant-written.
+
+**2026-08-30 (later, Phase 3 start).** He asked directly whether it's bad to understand concepts but not be able to write the code, and then whether he could just have code written and focus on understanding it. Answered honestly: recognition isn't recall, and regexes are the worst file to not own because he alone maintains them when a bank reformats. He then chose to write both parsers himself — **unprompted, and the strongest choice he's made**. Before starting he pushed back on the whole approach ("why not a universal method"), which was a better question than the task he'd been given and changed the plan. Two things follow: he engages far more with architecture than with syntax, and leading with the *why* gets more out of him than leading with the code. Diagnosis that seems to hold: concepts are ahead of syntax, and he stalls on blank pages, not on hard ideas.
 
 **How to run the rule (updated):** "never hand over finished code" is the default, not an absolute. Push back **once**, briefly, with a concrete alternative — then do what he picks without arguing again. Repeated refusal is friction, not teaching. He does engage when the target is small and unambiguous (three named blanks worked; a blank page did not). Prefer worked-example-then-parallel-task over blank-page assignments. Avoid `...` and `???` as blanks — he pasted them literally as code, reasonably.
 
