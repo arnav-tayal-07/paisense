@@ -69,7 +69,54 @@ PROMO = (
     {"status": "ignored"},
 )
 
-CASES = [AXIS_SPEND, AMEX_PAYMENT, OTP, PROMO]
+IDFC_PURCHASE = (
+    "IDFC purchase",
+    "JD-IDFCFB-S",
+    "Delicious Purchase! INR 84.00 spent on your IDFC FIRST Bank Credit Card "
+    "ending XX4321 at KARIMS MUGHLAI RESTA on 07 AUG 2026 at 08:38 PM "
+    "Avbl Limit: INR 15000.00 If not done by you, call 1800100000 for "
+    "dispute or to block your card SMS CCBLOCK 4321 to 5670000",
+    {
+        "status": "parsed",
+        "type": "expense",
+        "amount": Decimal("84.00"),
+        "merchant": "KARIMS MUGHLAI RESTA",
+        # 08:38 PM -> 20:38. 12-hour time appears in no other bank's format.
+        "txn_time": "2026-08-07T20:38:00+05:30",
+        "avl_limit": Decimal("15000.00"),
+        "card_last4": "4321",
+    },
+)
+
+# Recurring subscription charge. No merchant keyword like "at" or "to" —
+# the payee is named mid-sentence, and the message is mostly noise: a URL,
+# a reference ID, and instructions for managing the standing instruction.
+IDFC_STANDING_INSTRUCTION = (
+    "IDFC standing instruction",
+    "JD-IDFCFB-S",
+    "INR 2399.00 for Anthropic paid from your IDFC FIRST Bank Credit Card "
+    "XX9876 on 01/09/2026 basis standing instruction (SI). "
+    "Manage SI on your card: https://example.invalid/x "
+    "using the SiHub ID: ABCDEF",
+    {
+        "status": "parsed",
+        "type": "expense",
+        "amount": Decimal("2399.00"),
+        "merchant": "Anthropic",
+        "txn_time": "2026-09-01T00:00:00+05:30",
+        "avl_limit": None,
+        "card_last4": "9876",
+    },
+)
+
+CASES = [
+    AXIS_SPEND,
+    AMEX_PAYMENT,
+    IDFC_PURCHASE,
+    IDFC_STANDING_INSTRUCTION,
+    OTP,
+    PROMO,
+]
 
 
 def check(label, sender, body, expected):

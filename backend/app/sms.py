@@ -31,6 +31,12 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # numbers would hand it the float problem we spent ADR 011 avoiding —
 # 3230.00 could come back as 3230.0 or 3.23e3. Strings arrive exactly as
 # written, and Python converts them to Decimal.
+# Every key is REQUIRED and nullable. That combination is deliberate: with
+# only is_transaction required, the model was free to return a minimal answer
+# and did exactly that on noisier messages — {"is_transaction": true,
+# "type": "expense"} and nothing else. Requiring every key removes the
+# latitude; nullable gives it somewhere honest to put "this message has no
+# merchant" instead of inventing one.
 EXTRACTION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -41,27 +47,49 @@ EXTRACTION_SCHEMA = {
         "type": {
             "type": "string",
             "enum": ["expense", "income", "card_payment"],
+            "nullable": True,
         },
         "amount": {
             "type": "string",
-            "description": "Digits exactly as they appear, e.g. '845' or '3,230.00'.",
+            "description": "Digits exactly as they appear, e.g. '845' or '3,230.00'. Never null for a transaction.",
+            "nullable": True,
         },
-        "merchant": {"type": "string"},
+        "merchant": {
+            "type": "string",
+            "description": "Who was paid. Null if the message names nobody.",
+            "nullable": True,
+        },
         "card_last4": {
             "type": "string",
-            "description": "The masked digits, 4 or 5 of them. Amex shows 5.",
+            "description": "The masked digits only, 4 or 5 of them. Amex shows 5. Null if absent.",
+            "nullable": True,
         },
         "occurred_at": {
             "type": "string",
             "description": "ISO 8601 in IST, e.g. 2026-08-27T17:31:03+05:30. Midnight if no time given.",
+            "nullable": True,
         },
-        "avl_limit": {"type": "string"},
+        "avl_limit": {
+            "type": "string",
+            "description": "Available/remaining limit if stated. Null otherwise.",
+            "nullable": True,
+        },
         "reason": {
             "type": "string",
             "description": "If is_transaction is false, one short phrase saying what it is.",
+            "nullable": True,
         },
     },
-    "required": ["is_transaction"],
+    "required": [
+        "is_transaction",
+        "type",
+        "amount",
+        "merchant",
+        "card_last4",
+        "occurred_at",
+        "avl_limit",
+        "reason",
+    ],
 }
 
 INSTRUCTIONS = """\
@@ -78,13 +106,22 @@ When it IS a transaction, classify it:
 spending nor income - it settles purchases already recorded as expenses.
 
 Rules:
+- Return EVERY field. Use null for anything the message does not contain. \
+Never omit a key.
+- When is_transaction is true, amount and occurred_at must NOT be null - \
+every transaction message states an amount and a date somewhere.
 - amount: copy the digits exactly as written, keeping commas and decimals.
+- merchant: who was paid. Null if the message names nobody. For a recurring \
+standing instruction, the merchant is whoever is being paid.
 - card_last4: the masked digits only, no X or * characters. May be 4 or 5.
 - occurred_at: the time in the MESSAGE, not the time you are reading it. \
-Indian dates are day-first: 27-08-26 is 27 August 2026, 29/08/2026 is \
-29 August 2026. Use +05:30. If only a date is given, use 00:00:00.
-- Omit any field the message does not contain. Never guess a merchant, \
-an amount, or a date.
+Indian dates are day-first: 27-08-26 and 27 AUG 2026 are both 27 August \
+2026; 29/08/2026 is 29 August 2026. Times may be 12-hour with AM/PM - \
+08:38 PM is 20:38. Use +05:30. If only a date is given, use 00:00:00.
+- Ignore phone numbers, reference IDs, URLs and card-blocking instructions. \
+They are noise, never the amount or the merchant.
+- Never guess a merchant, an amount, or a date. Null is always better than \
+a plausible invention.
 """
 
 
