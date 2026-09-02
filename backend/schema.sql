@@ -286,3 +286,58 @@ create index raw_sms_needs_attention_idx on raw_sms (received_at desc)
 
 alter table raw_sms enable row level security;
 
+
+
+-- Regexes the model wrote for itself. The LLM as a COMPILER rather than a
+-- runtime: it reads a few stored messages, writes a pattern for that bank's
+-- format, and from then on the pattern does the work — free, instant,
+-- deterministic. The model stays as the fallback for anything no pattern
+-- matches, and as the author of the next pattern when a bank rewrites its
+-- wording. This is what makes importing months of history practical: several
+-- hundred messages through the LLM would exhaust free-tier quota for days.
+create table sms_patterns (
+  id            bigint generated always as identity primary key,
+
+  -- DLT sender segment, e.g. RBLBNK. Matched as a substring of the full
+  -- header, so VA-RBLBNK-S and VM-RBLBNK-T both hit.
+  sender_code   text not null,
+  name          text not null,
+
+  -- Regex with NAMED groups. The names ARE the field mapping, so there is no
+  -- separate lookup table to drift out of sync. Recognised: amount, merchant,
+  -- counterparty, account_last4, reference, occurred, balance.
+  pattern       text not null,
+
+  -- strptime format for whatever `occurred` captured. Null when the format
+  -- carries no date.
+  date_format   text,
+
+  -- Fixed per format: one message shape always means one direction.
+  txn_type      text not null check (txn_type in ('expense', 'income', 'card_payment')),
+
+  -- candidate -> failed validation, or validated on only ONE sample. Not used.
+  -- active    -> reproduced the model's own answer on 2+ samples. Trusted.
+  -- retired   -> superseded, or stopped compiling.
+  status        text not null default 'candidate'
+                  check (status in ('candidate', 'active', 'retired')),
+  sample_count  int not null default 0,
+
+  -- A rising miss rate is how a bank announces it changed its wording, so
+  -- regeneration triggers on evidence rather than on a calendar.
+  hits          bigint not null default 0,
+  misses        bigint not null default 0,
+
+  note          text,
+  created_at    timestamptz not null default now(),
+  last_used_at  timestamptz
+);
+
+create index sms_patterns_lookup_idx on sms_patterns (sender_code)
+  where status = 'active';
+
+alter table sms_patterns enable row level security;
+
+-- Deliberately NO owner column. An SMS format belongs to a bank, not a
+-- customer: RBL's message shape is identical for every RBL customer. When
+-- PaiSense becomes multi-user, transactions are per-user and patterns stay
+-- shared, so one user hitting a new format teaches it for everybody.

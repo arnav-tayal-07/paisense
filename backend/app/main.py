@@ -23,6 +23,7 @@ from .accounts import (
     update_account,
 )
 from .ingest import ingest, list_ignored, list_unparsed, reprocess_failed
+from .patterns import generate as generate_pattern, stats as pattern_stats
 from .models import AccountIn, AccountNumberIn, AccountPatch, SmsIn, TransactionIn, TransactionPatch
 from .transactions import (
     create_transaction,
@@ -124,6 +125,32 @@ def get_ignored_sms(limit: int = Query(default=50, ge=1, le=200)):
     An ignored row is in no other list and is never retried.
     """
     return list_ignored(limit)
+
+
+@app.post("/sms/patterns/{sender_code}")
+def post_generate_pattern(sender_code: str, samples: int = Query(default=8, ge=2, le=20)):
+    """Have the model write a regex for one bank's message format.
+
+    Learns from messages it already parsed correctly, so the right answers
+    are ground truth already in the database - validation costs no extra API
+    calls. A pattern only becomes active if it reproduces the model's own
+    answer on EVERY sample.
+
+    After this, messages in that format cost nothing to parse.
+    """
+    with get_conn() as conn:
+        return generate_pattern(conn, sender_code, limit=samples)
+
+
+@app.get("/sms/patterns")
+def get_patterns():
+    """Every pattern with its hit and miss counts.
+
+    A rising miss rate is how a bank announces it changed its wording -
+    which is the trigger to regenerate, rather than doing it on a calendar.
+    """
+    with get_conn() as conn:
+        return pattern_stats(conn)
 
 
 @app.get("/transactions/review")

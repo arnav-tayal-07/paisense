@@ -319,3 +319,29 @@ The model is *also* asked for the reference — not to use, but so a disagreemen
 **`/health` stays open** — the keepalive workflow pings it and it reveals nothing beyond "the server is up". `/docs` stays open too: it describes the shape of the API, not the data.
 
 **Note on patterns and ownership:** when the LLM-generated regex patterns (ADR 029) arrive, they are the one thing that should *not* become per-user. An SMS format belongs to a bank, not to a customer — RBL's message shape is identical for everyone. In a multi-user world, transactions are per-user and patterns are shared, so one user hitting a new bank format teaches it for everybody.
+
+## 029 — The model writes the parser; the parser reads the messages
+
+**Context:** Arnav proposed generating a regex per bank with the LLM, then using that regex instead of calling the model every time. The immediate driver was importing SMS history — several hundred messages through the LLM would exhaust free-tier quota for days.
+
+**Decision:** Store LLM-generated regexes in `sms_patterns`. On each message, try the active patterns for that sender first; fall back to the model only when none match. The model remains the author of new patterns and the fallback for anything they miss.
+
+**Why this is the right shape:** understanding a message format is expensive and only has to happen once — a bank sends the same shape every time. Using an LLM per message pays that cost repeatedly for no new information. Measured: **0.77s and zero API calls** through a pattern, against ~3s and one call through the model.
+
+**The failure mode that dictates the whole design.** A pattern that *fails to match* is harmless — it falls through to the model and costs one call. A pattern that *matches and captures the wrong field* would produce wrong numbers forever with nothing to notice, because no API call happens to disagree with it. So a pattern only becomes `active` if it reproduces the model's own extraction on every sample it claims to cover.
+
+**Validation costs nothing extra.** Ground truth is already in the database: `raw_sms` joined to the `transactions` the model produced earlier. The model is both author and examiner, and the exam is free.
+
+**One sample is not evidence.** A pattern validated against a single message can simply have hard-coded it. Passing on one sample yields `candidate`, not `active`; it waits for a second message of that format.
+
+**One sender needs several patterns.** The first generation attempt refused outright — the model correctly reported that the IDFC samples were more than one format, because IDFC sends card purchases *and* standing-instruction charges from the same header. RBL is worse: debits and credits differ in wording, date format *and* reference label. So generation returns a **list**, with the model grouping the samples itself and each pattern validated only against its own group.
+
+**Regenerate on miss rate, not on a calendar.** Arnav's original suggestion was monthly. Rejected: replacing a working pattern monthly risks swapping it for a worse one with nothing to notice. `hits` and `misses` are counted per pattern, and a rising miss rate is how a bank announces it changed its wording.
+
+**Retries deliberately skip patterns.** If a message previously failed, the pattern is the last thing that should be trusted on it again.
+
+**Bug found during validation, worth recording:** patterns produce a *naive* datetime in local terms, because that is how the message is written. The stored `txn_time` is `timestamptz`, which psycopg returns in UTC. Comparing them by stripping tzinfo put `10:05 IST` against `04:35 UTC` — the same instant, five and a half hours apart on paper — and failed every otherwise-correct pattern. Fixed by converting to IST before comparing.
+
+**Known risk, not mitigated:** a generated regex could in principle backtrack catastrophically. Bank SMS are short, which bounds it, and validation runs the pattern before it is ever trusted — but nothing detects a pathological pattern directly.
+
+**This is what makes "we use both regex and LLM" a design rather than a checklist item:** the model writes the parser, the parser reads the messages, and the model is the fallback when its own parser fails.

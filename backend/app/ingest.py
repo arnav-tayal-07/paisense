@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 
 from .accounts import resolve_account_id
 from .db import get_conn
-from .models import SmsIn
-from .sms import extract
+from .models import SmsIn, TransactionIn
+from .patterns import match_message
+from .sms import IST, build_dedupe_key, extract
 from .transactions import create_transaction
 
 # ON CONFLICT DO NOTHING against (sender, body, sms_sent_at): the phone
@@ -86,6 +87,18 @@ def process_raw(raw: dict) -> dict:
     Runs the LLM call OUTSIDE any open database connection, so a slow or
     hanging provider doesn't hold a connection from the pool.
     """
+    # Try the cheap path first: a regex the model wrote earlier for this
+    # bank's format. Free, instant, and the reason importing months of
+    # history is possible at all (ADR 029).
+    #
+    # Skipped on a retry — if this message previously failed, the pattern is
+    # exactly what we don't want to trust again.
+    if raw.get("parse_status") in (None, "pending"):
+        with get_conn() as conn:
+            hit = match_message(conn, raw["sender"], raw["body"])
+        if hit is not None:
+            return _record_pattern_hit(raw, hit)
+
     # Avoid the model that answered last time. A retry on the same model at
     # temperature 0 returns the same answer, so it would only ever confirm
     # its own mistake.
@@ -122,6 +135,48 @@ def process_raw(raw: dict) -> dict:
 
         return conn.execute(
             _UPDATE_RAW, ("parsed", None, row["id"], result.model, raw["id"])
+        ).fetchone()
+
+
+def _record_pattern_hit(raw: dict, hit) -> dict:
+    """Store a transaction that a regex produced, with no model involved."""
+    f = hit.fields
+    occurred = f["occurred_at"]
+    if occurred is not None and occurred.tzinfo is None:
+        occurred = occurred.replace(tzinfo=IST)
+
+    reference = f["reference"]
+    txn = TransactionIn(
+        type=f["type"],
+        amount=f["amount"],
+        merchant=f["merchant"],
+        counterparty=f["counterparty"],
+        account_last4=f["account_last4"],
+        upi_ref=reference,
+        reported_balance=f["reported_balance"],
+        txn_time=occurred,
+        source="sms",
+        dedupe_key=(
+            build_dedupe_key(raw["sender"], f["account_last4"], occurred, f["amount"], reference)
+            if (reference or occurred)
+            else None
+        ),
+    )
+
+    with get_conn() as conn:
+        txn.account_id = resolve_account_id(conn, raw["sender"], f["account_last4"])
+        row, _created = create_transaction(conn, txn)
+
+        if f["account_last4"] and txn.account_id is None:
+            conn.execute(
+                _MARK_REVIEW,
+                (f"account ending {f['account_last4']} is not registered", row["id"]),
+            )
+
+        # model = 'pattern:<id>' rather than a model name: provenance matters,
+        # and a retry needs to know a regex produced this, not a model.
+        return conn.execute(
+            _UPDATE_RAW, ("parsed", None, row["id"], f"pattern:{hit.pattern_id}", raw["id"])
         ).fetchone()
 
 
