@@ -3,12 +3,18 @@
 -- Rule: nothing exists in the database that isn't written down here.
 -- Order matters: a table must be created before anything that references it.
 
--- A credit ACCOUNT: one credit limit, one statement date, one due date.
--- Not one piece of plastic — see card_numbers below. Referenced by
--- transactions.card_id, so it goes first.
-create table cards (
+-- An ACCOUNT: a credit card account or a bank account. Not one piece of
+-- plastic — see account_numbers below. Referenced by transactions.account_id,
+-- so it goes first.
+create table accounts (
   id             bigint generated always as identity primary key,
   name           text not null,
+
+  -- Statement days, due dates and credit limits are credit-card concepts.
+  -- A savings account has none of them, enforced by the check at the bottom
+  -- so a bank account can't acquire a due date the app would remind you about.
+  kind           text not null default 'credit_card'
+                   check (kind in ('credit_card', 'bank_account')),
 
   -- DLT sender segment for the issuer: AXISBK, IDFCFB, AMEXIN, HDFCBK...
   -- Disambiguates lookups. Two banks can legitimately issue cards ending in
@@ -18,7 +24,8 @@ create table cards (
 
   -- Day the bill is generated. Values 29-31 must be clamped to the last day
   -- of shorter months when computing dates. February exists.
-  statement_day  int not null check (statement_day between 1 and 31),
+  -- Credit cards only; null on a bank account.
+  statement_day  int check (statement_day between 1 and 31),
 
   -- Two ways a card can express its due date, and real cards use both:
   --   due_day        - fixed day of the following month ("due on the 8th")
@@ -32,29 +39,37 @@ create table cards (
   credit_limit   numeric(12, 2),
 
   -- A closed account keeps its history but drops out of due-date reminders
-  -- and "which cards do I have" lists.
+  -- and "which accounts do I have" lists.
   is_active      boolean not null default true,
 
   created_at     timestamptz not null default now(),
 
-  -- Exactly one due rule. Neither set means no due date can be computed and
-  -- reminders silently never fire; both set means two answers that will
-  -- eventually disagree.
-  constraint cards_due_rule_check
-    check ((due_day is null) <> (due_days_after is null))
+  -- A credit card needs a statement day and exactly one due rule: neither
+  -- means reminders silently never fire, both means two answers that will
+  -- eventually disagree. A bank account must have none of these.
+  constraint accounts_kind_fields check (
+    (kind = 'credit_card'
+       and statement_day is not null
+       and ((due_day is null) <> (due_days_after is null)))
+    or
+    (kind = 'bank_account'
+       and statement_day is null and due_day is null
+       and due_days_after is null and credit_limit is null)
+  )
 );
 
--- The physical cards on an account. One IDFC account can carry a Visa and a
--- RuPay with different last4 digits sharing a single limit — standard in
--- India, because RuPay is what links to UPI. Two rows in `cards` would store
--- that one limit twice and duplicate the statement and due dates.
-create table card_numbers (
+-- The card or account numbers belonging to an account. One IDFC credit
+-- account carries a Visa and a RuPay with different last4 digits sharing a
+-- single limit — standard in India, because RuPay is what links to UPI. Two
+-- rows in `accounts` would store that one limit twice and duplicate the
+-- statement and due dates.
+create table account_numbers (
   id          bigint generated always as identity primary key,
 
-  -- Deleting an account removes its cards; a number is meaningless without
-  -- the account. Transactions are unaffected — they reference cards(id), and
-  -- that FK still blocks deleting an account that has spending history.
-  card_id     bigint not null references cards(id) on delete cascade,
+  -- Deleting an account removes its numbers; a number is meaningless without
+  -- the account. Transactions are unaffected — they reference accounts(id),
+  -- and that FK still blocks deleting an account that has history.
+  account_id  bigint not null references accounts(id) on delete cascade,
 
   -- 4 digits normally, 5 for Amex.
   last4       text not null check (last4 ~ '^[0-9]{4,6}$'),
@@ -69,21 +84,21 @@ create table card_numbers (
 
   -- Not globally unique on last4: two banks issuing cards ending 3577 is
   -- legitimate. The resolver disambiguates by issuer_code instead.
-  constraint card_numbers_unique_per_card unique (card_id, last4)
+  constraint account_numbers_unique_per_account unique (account_id, last4)
 );
 
 -- Every SMS triggers a lookup by last4. Hot path.
-create index card_numbers_last4_idx on card_numbers (last4);
+create index account_numbers_last4_idx on account_numbers (last4);
 
-alter table card_numbers enable row level security;
+alter table account_numbers enable row level security;
 
 -- RLS on, no policies. Deny-all for the anon/authenticated roles; the backend
 -- connects as the table owner via the session pooler, and owners bypass RLS.
 -- If the Data API is ever re-enabled, this table reads as EMPTY until policies
 -- exist — it fails silent, not loud. Verified enabled in Supabase 2026-08-29.
-alter table cards enable row level security;
+alter table accounts enable row level security;
 
--- Every expense and income row. References cards, so it comes after it.
+-- Every expense, income and card payment. References accounts, so it comes after.
 create table transactions (
   id              bigint generated always as identity primary key,
 
@@ -114,14 +129,20 @@ create table transactions (
   -- Defaults to now() for manual entry; the SMS parser passes the real time.
   txn_time        timestamptz not null default now(),
 
-  -- Real bank reference when the message carries one. NOT unique any more:
-  -- dedupe is dedupe_key's job alone, and a second unique constraint would
-  -- raise instead of being swallowed by ON CONFLICT (dedupe_key).
+  -- The bank's own transaction reference when the message carries one,
+  -- pulled out by REGEX rather than by the model (ADR 026): it is a
+  -- meaningless identifier, so a transposed digit looks perfectly valid and
+  -- would silently break dedupe. NOT unique — dedupe is dedupe_key's job
+  -- alone, and a second unique constraint would raise instead of being
+  -- swallowed by ON CONFLICT (dedupe_key).
   upi_ref         text,
 
-  -- What dedupe actually runs on. DERIVED by the parser, not read from the
-  -- message — credit card SMS carry no reference at all, so the key is built
-  -- from bank + card + timestamp + amount. Nullable: manual entries have no
+  -- What dedupe actually runs on. Uses upi_ref when the message has one,
+  -- since a reference is unique by definition. Falls back to a DERIVED key
+  -- (bank + card + timestamp + amount) for card SMS, which carry no
+  -- reference — and that fallback is genuinely weaker: RBL's debit format
+  -- has a date but no time, so two same-amount payments in one day would
+  -- collide and the second would be silently dropped. Nullable: manual entries have no
   -- natural key, and Postgres treats NULLs as distinct, so any number of
   -- them coexist while a re-scanned SMS collides and is dropped by
   -- ON CONFLICT (dedupe_key) DO NOTHING.
@@ -132,17 +153,23 @@ create table transactions (
   -- Tighten to a check once the parser has seen real messages.
   payment_method  text,
 
-  -- The ACCOUNT this belongs to. Nullable: only card spends point at one.
-  -- No ON DELETE clause, so the default blocks deleting an account that
-  -- still has history — spending records shouldn't vanish with the card.
-  card_id         bigint references cards(id),
+  -- The ACCOUNT this belongs to. Nullable: cash and unmatched messages
+  -- point at nothing. No ON DELETE clause, so the default blocks deleting an
+  -- account that still has history — records shouldn't vanish with it.
+  account_id      bigint references accounts(id),
 
-  -- WHICH physical card, as the message reported it. Text rather than a
-  -- foreign key on purpose: a snapshot of what the SMS actually said, in
-  -- the same spirit as raw_sms. Survives a card_numbers row being edited or
-  -- deleted, needs no join, and can't drift from the evidence. Lets you
-  -- separate RuPay (UPI) spending from Visa (swipe) on one account.
-  card_last4      text,
+  -- WHICH card or account the message named, as it reported it. Text rather
+  -- than a foreign key on purpose: a snapshot of what the SMS actually said,
+  -- in the same spirit as raw_sms. Survives an account_numbers row being
+  -- edited or deleted, needs no join, and can't drift from the evidence.
+  -- Lets you separate RuPay (UPI) spending from Visa (swipe) on one account.
+  account_last4   text,
+
+  -- Who the money went to or came from when no business is named. UPI gives
+  -- a VPA (paytmqr6s4v8c@ptys) or just the other account's digits (XX7575) —
+  -- neither is a merchant, and forcing them into `merchant` would produce a
+  -- spending report full of raw account numbers.
+  counterparty    text,
 
   -- How the row got here. Not null with a default because every row has a
   -- provenance, and 'manual' is the honest answer when nothing says otherwise.
@@ -153,11 +180,12 @@ create table transactions (
   -- Free text, always optional.
   note            text,
 
-  -- The card's available limit as reported by the SMS at that moment. On
-  -- transactions rather than cards: a column on cards would be one stale
-  -- number, whereas the newest row per card gives the current figure and
-  -- keeps the history. Null for anything that isn't a card SMS.
-  avl_limit       numeric(12, 2),
+  -- What the bank said was left afterwards: "Avl Limit" on a card, "AvlBal"
+  -- on a bank account. One column, because the reconciliation arithmetic is
+  -- identical — both fall on a debit. On transactions rather than accounts:
+  -- a column on accounts would be one stale number, whereas the newest row
+  -- per account gives the current figure AND keeps the history.
+  reported_balance numeric(12, 2),
 
   -- Whether a human still needs to look at this. The extraction guardrail
   -- catches an invented amount but not the model picking the wrong REAL
@@ -184,10 +212,10 @@ create table transactions (
 -- txn_time. desc because every screen shows newest first.
 create index transactions_txn_time_idx on transactions (txn_time desc);
 
--- For per-card totals and due-date screens. Partial: most rows have no card,
+-- For per-account totals and due-date screens. Partial: many rows have none,
 -- and there's no reason to index the NULLs.
-create index transactions_card_id_idx on transactions (card_id)
-  where card_id is not null;
+create index transactions_account_id_idx on transactions (account_id)
+  where account_id is not null;
 
 -- The review queue is a small slice of a large table.
 create index transactions_review_idx on transactions (txn_time desc)
@@ -197,7 +225,7 @@ create index transactions_review_idx on transactions (txn_time desc)
 create index transactions_countable_idx on transactions (txn_time desc)
   where review_status in ('auto', 'confirmed');
 
--- Matches cards. Data API is disabled, but RLS on by default is the right posture.
+-- Matches accounts. Data API is disabled, but RLS on by default is the right posture.
 alter table transactions enable row level security;
 
 

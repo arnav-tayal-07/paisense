@@ -61,9 +61,25 @@ EXTRACTION_SCHEMA = {
             "description": "Who was paid. Null if the message names nobody.",
             "nullable": True,
         },
-        "card_last4": {
+        "account_last4": {
             "type": "string",
-            "description": "The masked digits only, 4 or 5 of them. Amex shows 5. Null if absent.",
+            "description": (
+                "Trailing digits of the sender's OWN card or account, no X or * characters. "
+                "4 to 6 of them. NOT the destination account."
+            ),
+            "nullable": True,
+        },
+        "counterparty": {
+            "type": "string",
+            "description": (
+                "Who the money went to or came from: a UPI VPA like name@bank, or the "
+                "other account's masked digits. Null if the message names neither."
+            ),
+            "nullable": True,
+        },
+        "reference": {
+            "type": "string",
+            "description": "Transaction reference exactly as printed - UPI Ref, Ref, RRN.",
             "nullable": True,
         },
         "occurred_at": {
@@ -71,9 +87,12 @@ EXTRACTION_SCHEMA = {
             "description": "ISO 8601 in IST, e.g. 2026-08-27T17:31:03+05:30. Midnight if no time given.",
             "nullable": True,
         },
-        "avl_limit": {
+        "reported_balance": {
             "type": "string",
-            "description": "Available/remaining limit if stated. Null otherwise.",
+            "description": (
+                "What the bank said was left afterwards - 'Avl Limit' on a card, "
+                "'AvlBal' on a bank account. Null if not stated."
+            ),
             "nullable": True,
         },
         "reason": {
@@ -87,9 +106,11 @@ EXTRACTION_SCHEMA = {
         "type",
         "amount",
         "merchant",
-        "card_last4",
+        "account_last4",
+        "counterparty",
+        "reference",
         "occurred_at",
-        "avl_limit",
+        "reported_balance",
         "reason",
     ],
 }
@@ -113,9 +134,15 @@ Never omit a key.
 - When is_transaction is true, amount and occurred_at must NOT be null - \
 every transaction message states an amount and a date somewhere.
 - amount: copy the digits exactly as written, keeping commas and decimals.
-- merchant: who was paid. Null if the message names nobody. For a recurring \
-standing instruction, the merchant is whoever is being paid.
-- card_last4: the masked digits only, no X or * characters. May be 4 or 5.
+- merchant: a recognisable business NAME only, e.g. PVR LIMITED, Anthropic. \
+Null if the message names no business. Never put an account number here.
+- counterparty: where the money went or came from when it isn't a business \
+name - a UPI VPA like paytmqr6s4v8c@ptys, or the other party's masked \
+account digits. A message can have a counterparty and no merchant.
+- account_last4: the trailing digits of the sender's OWN card or account, \
+never the destination. 4 to 6 digits, no X or * characters.
+- reference: the transaction reference exactly as printed, after labels like \
+"UPI Ref", "UPI Ref no", "Ref:" or "RRN". Copy it character for character.
 - occurred_at: the time in the MESSAGE, not the time you are reading it. \
 Indian dates are day-first: 27-08-26 and 27 AUG 2026 are both 27 August \
 2026; 29/08/2026 is 29 August 2026. Times may be 12-hour with AM/PM - \
@@ -142,7 +169,10 @@ class Extraction:
     status: Literal["parsed", "ignored", "needs_review", "failed"]
     txn: TransactionIn | None = None
     error: str | None = None
-    card_last4: str | None = None
+
+    # Returned alongside the transaction as well as on it: turning digits into
+    # an account_id needs a database lookup, which has no place in a parser.
+    account_last4: str | None = None
 
     # Which model answered, so a retry can deliberately pick a different one.
     model: str | None = None
@@ -162,6 +192,29 @@ def looks_like_money(message: str) -> bool:
     return bool(_LOOKS_LIKE_MONEY.search(message))
 
 
+# The one field extracted by regex rather than by the model, and the reason is
+# exactness (ADR 026). A reference is a meaningless identifier - there is no
+# context to reason from, so a model transposing one digit produces a string
+# that looks perfectly valid. And this string IS the dedupe key: one wrong
+# character means the same transaction inserts twice on the next re-scan,
+# silently. A regex is exact or it fails; there is no "nearly right".
+#
+# Label forms seen in real messages:
+#   RBL debit   "(UPI Ref 661188335104)"
+#   RBL credit  "(UPI Ref no 105143193111)"
+#   BOB         "Ref:623928991037."
+_REFERENCE = re.compile(
+    r"\b(?:UPI\s*Ref(?:erence)?(?:\s*no\.?)?|Ref(?:erence)?(?:\s*no\.?)?|RRN)\s*[:.\-]?\s*([A-Za-z0-9]{6,})",
+    re.IGNORECASE,
+)
+
+
+def find_reference(message: str) -> str | None:
+    """Pull the transaction reference out verbatim. None if there isn't one."""
+    m = _REFERENCE.search(message)
+    return m.group(1) if m else None
+
+
 # --------------------------------------------------------------------------
 # Conversion helpers — the model returns strings, Python decides what's valid
 # --------------------------------------------------------------------------
@@ -172,15 +225,27 @@ def to_amount(raw: str) -> Decimal:
     return Decimal(raw.replace(",", "").replace("INR", "").strip())
 
 
-def build_dedupe_key(sender: str, last4: str | None, when: datetime, amount: Decimal) -> str:
-    """The derived dedupe key (ADR 017).
+def build_dedupe_key(
+    sender: str,
+    last4: str | None,
+    when: datetime,
+    amount: Decimal,
+    reference: str | None = None,
+) -> str:
+    """The dedupe key. A real reference beats a derived one.
 
-    Card SMS carry no reference number, so the key is built from the fields
-    that together identify the transaction. Same inputs must always produce
-    the same string, or a re-scan inserts a duplicate. That's why the bank
-    comes from the sender header rather than the message body — the body
-    wording could change, the DLT header won't.
+    A transaction reference is unique by definition, so when the message
+    carries one it IS the key and nothing else is needed.
+
+    The derived fallback (ADR 017) exists for card messages, which carry no
+    reference — and it is genuinely weaker. RBL's debit format has a date but
+    no time, so txn_time falls back to midnight; two UPI payments of the same
+    amount on the same day would produce identical keys and the second would
+    be silently discarded. That is precisely why the reference is pulled out
+    by regex rather than trusted to a model.
     """
+    if reference:
+        return f"{sender.upper().strip()}|ref:{reference}"
     bank = sender.upper().strip()
     return f"{bank}|{last4 or '-'}|{when.isoformat()}|{amount}"
 
@@ -295,40 +360,63 @@ def extract(
     if occurred_at and occurred_at.tzinfo is None:
         occurred_at = occurred_at.replace(tzinfo=IST)
 
-    last4 = data.get("card_last4") or None
+    last4 = data.get("account_last4") or None
 
-    avl_limit = None
-    if data.get("avl_limit"):
+    reported_balance = None
+    if data.get("reported_balance"):
         try:
-            avl_limit = to_amount(data["avl_limit"])
+            reported_balance = to_amount(data["reported_balance"])
         except InvalidOperation:
             # Not worth failing the whole transaction over — the amount and
-            # merchant are the point, the limit is a nice-to-have.
-            avl_limit = None
+            # payee are the point, the balance is a nice-to-have.
+            reported_balance = None
+
+    # Regex first, model second. The regex is authoritative because it copies
+    # characters; the model is asked as well purely so a disagreement can be
+    # surfaced rather than assumed away.
+    reference = find_reference(body)
+    model_reference = data.get("reference") or None
+
+    review_reason = None
+
+    if reference and model_reference and reference != model_reference:
+        review_reason = (
+            f"reference disagreement: regex read {reference!r}, model read {model_reference!r}"
+        )
+    elif not reference and model_reference:
+        # The regex didn't recognise the label. Use the model's value so the
+        # transaction still gets a real key, but flag it — an unrecognised
+        # label means a format the pattern should learn.
+        reference = model_reference
+        review_reason = f"reference {model_reference!r} found by model only, label not recognised"
 
     txn = TransactionIn(
         type=data.get("type", "expense"),
         amount=amount,
         merchant=data.get("merchant") or None,
+        counterparty=data.get("counterparty") or None,
         txn_time=occurred_at,
-        avl_limit=avl_limit,
-        card_last4=last4,
+        reported_balance=reported_balance,
+        account_last4=last4,
+        upi_ref=reference,
         source="sms",
-        dedupe_key=build_dedupe_key(sender, last4, occurred_at, amount) if occurred_at else None,
+        dedupe_key=(
+            build_dedupe_key(sender, last4, occurred_at, amount, reference)
+            if (reference or occurred_at)
+            else None
+        ),
     )
 
-    # The guardrail above only catches an INVENTED amount. It cannot catch the
-    # model picking the wrong REAL number, and every IDFC message contains two
-    # candidates — the spend and the available limit. If those come back equal,
-    # the wrong one was chosen: a purchase for exactly your remaining limit,
-    # to the paisa, does not happen.
-    review_reason = None
-    if avl_limit is not None and amount == avl_limit:
-        review_reason = "amount matches the available limit exactly - likely the wrong number"
+    # The amount guardrail only catches an INVENTED number. It cannot catch the
+    # model picking the wrong REAL one, and most messages carry two candidates —
+    # the amount and the balance. If those come back equal, the wrong one was
+    # chosen: a payment for exactly your remaining balance, to the paisa,
+    # does not happen.
+    if review_reason is None and reported_balance is not None and amount == reported_balance:
+        review_reason = "amount matches the reported balance exactly - likely the wrong number"
 
-    # card_last4 is set on the transaction above, and returned separately as
-    # well: card_id needs a database lookup (app.cards.resolve_card_id) that
-    # has no business inside a parsing function.
+    # last4 is on the transaction and returned separately: resolving it to an
+    # account_id needs a database lookup that has no business in a parser.
     return Extraction(
-        status="parsed", txn=txn, card_last4=last4, model=used, review_reason=review_reason
+        status="parsed", txn=txn, account_last4=last4, model=used, review_reason=review_reason
     )

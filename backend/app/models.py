@@ -30,42 +30,60 @@ class TransactionPatch(BaseModel):
     category: Optional[str] = None
     txn_time: Optional[datetime] = None
     payment_method: Optional[str] = None
-    card_id: Optional[int] = None
+    account_id: Optional[int] = None
+    counterparty: Optional[str] = None
     note: Optional[str] = None
 
 
-class CardIn(BaseModel):
-    """A credit account. The physical cards on it are added separately."""
+class AccountIn(BaseModel):
+    """A credit card account or a bank account.
+
+    Statement days, due dates and credit limits are credit-card concepts —
+    a savings account has none of them. The validator enforces that, so a
+    bank account can't quietly acquire a due date the app would then remind
+    you about.
+    """
 
     name: str
-    statement_day: int = Field(ge=1, le=31)
+    kind: Literal["credit_card", "bank_account"] = "credit_card"
 
-    # DLT sender segment: IDFCFB, AXISBK, AMEXIN. Used to disambiguate when
-    # two banks issue cards ending in the same digits.
+    # DLT sender segment: IDFCFB, AXISBK, RBLBNK, BOBSMS. Disambiguates when
+    # two banks issue accounts ending in the same digits.
     issuer_code: Optional[str] = None
 
-    # Exactly one due rule, mirroring the database check constraint. Real
-    # cards use both styles: "due on the 8th" and "due 20 days after".
+    # Credit-card only, all four.
+    statement_day: Optional[int] = Field(default=None, ge=1, le=31)
     due_day: Optional[int] = Field(default=None, ge=1, le=31)
     due_days_after: Optional[int] = Field(default=None, ge=1, le=60)
-
     credit_limit: Optional[Decimal] = Field(default=None, ge=0, max_digits=12, decimal_places=2)
 
     @model_validator(mode="after")
-    def exactly_one_due_rule(self):
+    def fields_match_kind(self):
         # Caught here as a clear 422 rather than as a constraint violation
-        # surfacing from Postgres as a 500.
-        if (self.due_day is None) == (self.due_days_after is None):
-            raise ValueError("set exactly one of due_day or due_days_after")
+        # surfacing from Postgres as an unreadable 500.
+        if self.kind == "credit_card":
+            if self.statement_day is None:
+                raise ValueError("statement_day is required for a credit_card")
+            if (self.due_day is None) == (self.due_days_after is None):
+                raise ValueError("set exactly one of due_day or due_days_after")
+        else:
+            extras = [
+                f
+                for f in ("statement_day", "due_day", "due_days_after", "credit_limit")
+                if getattr(self, f) is not None
+            ]
+            if extras:
+                raise ValueError(f"a bank_account cannot have {', '.join(extras)}")
         return self
 
 
-class CardPatch(BaseModel):
+class AccountPatch(BaseModel):
     """Partial update to an account — the app's edit button.
 
-    No due-rule validator here: a PATCH may legitimately send only `due_day`,
-    and the database check constraint is the backstop. The route clears the
-    other field when one is set, so the two can never both be populated.
+    No cross-field validator here: a PATCH may legitimately send only
+    `due_day`, and the database check constraint is the backstop. The route
+    clears the other due field when one is set, so both can never be
+    populated at once.
     """
 
     name: Optional[str] = None
@@ -77,8 +95,12 @@ class CardPatch(BaseModel):
     is_active: Optional[bool] = None
 
 
-class CardNumberIn(BaseModel):
-    """One physical card on an account."""
+class AccountNumberIn(BaseModel):
+    """One card or account number belonging to an account.
+
+    A credit account can carry several (Visa + RuPay sharing one limit); a
+    bank account usually has one.
+    """
 
     last4: str = Field(pattern=r"^[0-9]{4,6}$")
     network: Optional[Literal["visa", "rupay", "mastercard", "amex", "diners", "other"]] = None
@@ -123,14 +145,15 @@ class TransactionIn(BaseModel):
     payment_method: Optional[str] = None
     note: Optional[str] = None
 
-    # The account. Resolved from card_last4 by app.cards.resolve_card_id —
-    # callers usually supply card_last4 and let the lookup fill this in.
-    card_id: Optional[int] = None
+    # The account this belongs to. Resolved from account_last4 by
+    # app.accounts.resolve_account_id — callers supply the digits and let the
+    # lookup fill this in.
+    account_id: Optional[int] = None
 
-    # Which physical card, as the message reported it. One account can carry
-    # a Visa and a RuPay with different digits sharing a limit, so this is
+    # The card or account the message named, as it reported it. One credit
+    # account can carry a Visa and a RuPay with different digits, so this is
     # how RuPay (UPI) spend is told apart from Visa (swipe).
-    card_last4: Optional[str] = None
+    account_last4: Optional[str] = None
 
     # A real bank reference when the message carries one. Data only — it no
     # longer drives dedupe, and is no longer unique. See ADR 017.
@@ -141,9 +164,14 @@ class TransactionIn(BaseModel):
     # hand-typed rows are allowed: that repetition is usually deliberate.
     dedupe_key: Optional[str] = None
 
-    # The card's available limit as reported by a card SMS, snapshotted at
-    # this transaction. Null for everything else.
-    avl_limit: Optional[Decimal] = Field(default=None, max_digits=12, decimal_places=2)
+    # What the bank said was left afterwards: "Avl Limit" on a card,
+    # "AvlBal" on a bank account. One name, because the reconciliation
+    # arithmetic is identical either way.
+    reported_balance: Optional[Decimal] = Field(default=None, max_digits=12, decimal_places=2)
+
+    # Who the money went to or came from when there's no business name: a UPI
+    # VPA like paytmqr6s4v8c@ptys, or the other party's masked digits.
+    counterparty: Optional[str] = None
 
     # Optional on the way in: if the caller doesn't say when the money moved,
     # the database fills in now(). The SMS parser will pass the real time.

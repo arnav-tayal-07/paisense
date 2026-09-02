@@ -18,12 +18,12 @@ from .models import TransactionIn
 _INSERT = """
 insert into transactions
   (type, amount, merchant, category, txn_time,
-   upi_ref, dedupe_key, payment_method, card_id, card_last4,
-   source, note, avl_limit)
+   upi_ref, dedupe_key, payment_method, account_id, account_last4,
+   source, note, reported_balance, counterparty)
 values
   (%s, %s, %s, %s, coalesce(%s, now()),
    %s, %s, %s, %s, %s,
-   %s, %s, %s)
+   %s, %s, %s, %s)
 on conflict (dedupe_key) do nothing
 returning *
 """
@@ -49,11 +49,12 @@ def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool
         txn.upi_ref,
         txn.dedupe_key,
         txn.payment_method,
-        txn.card_id,
-        txn.card_last4,
+        txn.account_id,
+        txn.account_last4,
         txn.source,
         txn.note,
-        txn.avl_limit,
+        txn.reported_balance,
+        txn.counterparty,
     )
 
     row = conn.execute(_INSERT, params).fetchone()
@@ -77,7 +78,7 @@ def list_transactions(
     txn_type: str | None = None,
     category: str | None = None,
     merchant: str | None = None,
-    card_id: int | None = None,
+    account_id: int | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     countable_only: bool = True,
@@ -99,8 +100,8 @@ def list_transactions(
         # match, so "zom" finds "Zomato".
         ("merchant ilike %s", f"%{merchant}%" if merchant else None),
         # Spend per card. The SMS gives a last4 string; the parser resolves
-        # that to a card_id, so filtering happens on the foreign key.
-        ("card_id = %s", card_id),
+        # that to a account_id, so filtering happens on the foreign key.
+        ("account_id = %s", account_id),
         # Half-open interval: start <= txn_time < end. Using <= on both ends
         # would double-count a transaction landing exactly at midnight on the
         # boundary when the agent asks for two consecutive months.
@@ -165,15 +166,15 @@ def set_review(conn: Connection, txn_id: int, status: str) -> dict | None:
 
 
 _RECONCILE = """
-select id, txn_time, type, amount, avl_limit, merchant, card_last4
+select id, txn_time, type, amount, reported_balance, merchant, account_last4
 from transactions
-where card_id = %s and avl_limit is not null
+where account_id = %s and reported_balance is not null
   and review_status in ('auto', 'confirmed')
 order by txn_time
 """
 
 
-def reconcile_card(conn: Connection, card_id: int) -> dict:
+def reconcile_account(conn: Connection, account_id: int) -> dict:
     """Check recorded spending against the bank's own available-limit figures.
 
     Every card SMS reports the limit remaining afterwards. Between two
@@ -185,11 +186,11 @@ def reconcile_card(conn: Connection, card_id: int) -> dict:
     This is the only check that can catch a MISSING transaction. Everything
     else can only inspect messages that did arrive.
     """
-    rows = conn.execute(_RECONCILE, (card_id,)).fetchall()
+    rows = conn.execute(_RECONCILE, (account_id,)).fetchall()
     gaps = []
 
     for prev, curr in zip(rows, rows[1:]):
-        observed = prev["avl_limit"] - curr["avl_limit"]
+        observed = prev["reported_balance"] - curr["reported_balance"]
         # A spend reduces the available limit; paying the bill restores it.
         expected = curr["amount"] if curr["type"] != "card_payment" else -curr["amount"]
         unexplained = observed - expected
@@ -210,7 +211,7 @@ def reconcile_card(conn: Connection, card_id: int) -> dict:
             )
 
     return {
-        "card_id": card_id,
+        "account_id": account_id,
         "checked": len(rows),
         "gaps": gaps,
         # Fewer than two datapoints means nothing can be compared yet.
@@ -243,7 +244,8 @@ def update_transaction(conn: Connection, txn_id: int, changes: dict) -> dict | N
         "category",
         "txn_time",
         "payment_method",
-        "card_id",
+        "account_id",
+        "counterparty",
         "note",
     }
     fields = {k: v for k, v in changes.items() if k in allowed}

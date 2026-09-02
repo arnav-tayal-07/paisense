@@ -13,23 +13,23 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from psycopg.errors import ForeignKeyViolation
 
 from .db import get_conn
-from .cards import (
-    add_card_number,
-    create_card,
-    get_card,
-    list_cards,
+from .accounts import (
+    add_account_number,
+    create_account,
+    get_account,
+    list_accounts,
     set_number_active,
-    update_card,
+    update_account,
 )
 from .ingest import ingest, list_ignored, list_unparsed, reprocess_failed
-from .models import CardIn, CardNumberIn, CardPatch, SmsIn, TransactionIn, TransactionPatch
+from .models import AccountIn, AccountNumberIn, AccountPatch, SmsIn, TransactionIn, TransactionPatch
 from .transactions import (
     create_transaction,
     delete_transaction,
     get_transaction,
     list_for_review,
     list_transactions,
-    reconcile_card,
+    reconcile_account,
     set_review,
     update_transaction,
 )
@@ -61,11 +61,11 @@ def post_transaction(txn: TransactionIn, response: Response):
         with get_conn() as conn:
             row, created = create_transaction(conn, txn)
     except ForeignKeyViolation:
-        # card_id pointed at a card that doesn't exist. That's the caller's
+        # account_id pointed at a card that doesn't exist. That's the caller's
         # mistake, so 400 — not a 500, which would imply the server broke.
         raise HTTPException(
             status_code=400,
-            detail=f"card_id {txn.card_id} does not exist",
+            detail=f"account_id {txn.account_id} does not exist",
         )
 
     response.status_code = 201 if created else 200
@@ -177,84 +177,86 @@ def patch_transaction(txn_id: int, changes: TransactionPatch):
         with get_conn() as conn:
             row = update_transaction(conn, txn_id, changes.model_dump(exclude_unset=True))
     except ForeignKeyViolation:
-        raise HTTPException(status_code=400, detail=f"card_id {changes.card_id} does not exist")
+        raise HTTPException(status_code=400, detail=f"account_id {changes.account_id} does not exist")
 
     if row is None:
         raise HTTPException(status_code=404, detail=f"No transaction with id {txn_id}")
     return row
 
 
-@app.post("/cards", status_code=201)
-def post_card(card: CardIn):
-    """Create a credit account. Card numbers are added separately.
+@app.post("/accounts", status_code=201)
+def post_account(account: AccountIn):
+    """Create a credit card account or a bank account.
 
-    An account is the thing with one limit, one statement day and one due
-    date; the physical cards on it are a different table (ADR 020).
+    An account is the thing money belongs to; the card or account NUMBERS on
+    it are a separate table, because one credit account can carry a Visa and
+    a RuPay sharing a single limit (ADR 020, 026).
     """
     with get_conn() as conn:
-        return create_card(
+        return create_account(
             conn,
-            name=card.name,
-            statement_day=card.statement_day,
-            issuer_code=card.issuer_code,
-            due_days_after=card.due_days_after,
-            credit_limit=card.credit_limit,
-            due_day=card.due_day,
+            name=account.name,
+            kind=account.kind,
+            statement_day=account.statement_day,
+            issuer_code=account.issuer_code,
+            due_days_after=account.due_days_after,
+            credit_limit=account.credit_limit,
+            due_day=account.due_day,
         )
 
 
-@app.get("/cards")
-def get_cards():
+@app.get("/accounts")
+def get_accounts():
     """All accounts, each with its physical cards nested."""
     with get_conn() as conn:
-        return list_cards(conn)
+        return list_accounts(conn)
 
 
-@app.patch("/cards/{card_id}")
-def patch_card(card_id: int, changes: CardPatch):
+@app.patch("/accounts/{account_id}")
+def patch_account(account_id: int, changes: AccountPatch):
     """Edit an account — the app's edit button.
 
     Setting one due rule clears the other, so switching from "due 20 days
     after" to "due on the 8th" is a single field, not two.
     """
     with get_conn() as conn:
-        row = update_card(conn, card_id, changes.model_dump(exclude_unset=True))
+        row = update_account(conn, account_id, changes.model_dump(exclude_unset=True))
     if row is None:
-        raise HTTPException(status_code=404, detail=f"No card with id {card_id}")
+        raise HTTPException(status_code=404, detail=f"No card with id {account_id}")
     return row
 
 
-@app.post("/cards/{card_id}/numbers", status_code=201)
-def post_card_number(card_id: int, number: CardNumberIn):
+@app.post("/accounts/{account_id}/numbers", status_code=201)
+def post_account_number(account_id: int, number: AccountNumberIn):
     """Attach a physical card. Re-adding an existing one is a no-op."""
     with get_conn() as conn:
-        if get_card(conn, card_id) is None:
-            raise HTTPException(status_code=404, detail=f"No card with id {card_id}")
-        row = add_card_number(conn, card_id, number.last4, number.network)
+        if get_account(conn, account_id) is None:
+            raise HTTPException(status_code=404, detail=f"No card with id {account_id}")
+        row = add_account_number(conn, account_id, number.last4, number.network)
         if row is None:
             raise HTTPException(
                 status_code=409,
-                detail=f"{number.last4} is already on card {card_id}",
+                detail=f"{number.last4} is already on card {account_id}",
             )
         return row
 
 
-@app.patch("/cards/{card_id}/numbers/{last4}")
-def patch_card_number(card_id: int, last4: str, is_active: bool):
+@app.patch("/accounts/{account_id}/numbers/{last4}")
+def patch_account_number(account_id: int, last4: str, is_active: bool):
     """Retire or restore a physical card after reissue.
 
     Never deletes: an old SMS from the replaced card must still resolve to
     this account, so history survives a reissue.
     """
     with get_conn() as conn:
-        row = set_number_active(conn, card_id, last4, is_active)
+        row = set_number_active(conn, account_id, last4, is_active)
     if row is None:
-        raise HTTPException(status_code=404, detail=f"{last4} is not on card {card_id}")
+        raise HTTPException(status_code=404, detail=f"{last4} is not on card {account_id}")
     return row
 
 
-@app.get("/cards/{card_id}/reconcile")
-def get_card_reconciliation(card_id: int):
+@app.get("/accounts/{account_id}/reconcile")
+def get_account_reconciliation(account_id: int):
     """Check recorded spending against the bank's own available-limit figures.
 
     Between two consecutive card SMS the limit should move by exactly the
@@ -263,7 +265,7 @@ def get_card_reconciliation(card_id: int):
     MISSING message — everything else can only inspect ones that arrived.
     """
     with get_conn() as conn:
-        return reconcile_card(conn, card_id)
+        return reconcile_account(conn, account_id)
 
 
 @app.get("/transactions")
@@ -279,7 +281,7 @@ def get_transactions(
     ),
     category: str | None = None,
     merchant: str | None = Query(default=None, description="Case-insensitive partial match"),
-    card_id: int | None = Query(default=None, description="Spend on one card"),
+    account_id: int | None = Query(default=None, description="Spend on one card"),
     start: datetime | None = Query(default=None, description="Inclusive lower bound on txn_time"),
     end: datetime | None = Query(default=None, description="Exclusive upper bound on txn_time"),
     include_unreviewed: bool = Query(
@@ -300,7 +302,7 @@ def get_transactions(
             txn_type=txn_type,
             category=category,
             merchant=merchant,
-            card_id=card_id,
+            account_id=account_id,
             start=start,
             end=end,
             countable_only=not include_unreviewed,

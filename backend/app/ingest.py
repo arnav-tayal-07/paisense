@@ -10,7 +10,7 @@ exactly the data loss the table exists to prevent.
 
 from datetime import datetime, timezone
 
-from .cards import resolve_card_id
+from .accounts import resolve_account_id
 from .db import get_conn
 from .models import SmsIn
 from .sms import extract
@@ -104,18 +104,18 @@ def process_raw(raw: dict) -> dict:
         # Digits -> account. Returns None when unknown or ambiguous, and the
         # transaction is stored unlinked rather than mis-linked. Replaying
         # this message after adding the card fixes it.
-        txn.card_id = resolve_card_id(conn, raw["sender"], result.card_last4)
+        txn.account_id = resolve_account_id(conn, raw["sender"], result.account_last4)
 
         # created=False means dedupe_key already existed — a message that
         # produced this transaction before. Still link the raw row to it, so
         # every copy of the message points at the transaction it describes.
         row, _created = create_transaction(conn, txn)
 
-        # Money that belongs to a card we can't identify won't appear in any
-        # per-card total, and nothing else would ever mention it.
+        # Money that belongs to a account we can't identify won't appear in any
+        # per-account total, and nothing else would ever mention it.
         reason = result.review_reason
-        if reason is None and result.card_last4 and txn.card_id is None:
-            reason = f"card ending {result.card_last4} is not registered"
+        if reason is None and result.account_last4 and txn.account_id is None:
+            reason = f"account ending {result.account_last4} is not registered"
 
         if reason:
             conn.execute(_MARK_REVIEW, (reason, row["id"]))

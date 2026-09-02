@@ -31,8 +31,8 @@ AXIS_SPEND = (
         "amount": Decimal("845"),
         "merchant": "PVR LIMITED",
         "txn_time": "2026-08-27T17:31:03+05:30",
-        "avl_limit": Decimal("135651.12"),
-        "card_last4": "1234",
+        "reported_balance": Decimal("135651.12"),
+        "account_last4": "1234",
     },
 )
 
@@ -48,8 +48,8 @@ AMEX_PAYMENT = (
         "amount": Decimal("3230.00"),
         "merchant": None,
         "txn_time": "2026-08-29T00:00:00+05:30",
-        "avl_limit": None,
-        "card_last4": "56789",
+        "reported_balance": None,
+        "account_last4": "56789",
     },
 )
 
@@ -83,8 +83,8 @@ IDFC_PURCHASE = (
         "merchant": "KARIMS MUGHLAI RESTA",
         # 08:38 PM -> 20:38. 12-hour time appears in no other bank's format.
         "txn_time": "2026-08-07T20:38:00+05:30",
-        "avl_limit": Decimal("15000.00"),
-        "card_last4": "4321",
+        "reported_balance": Decimal("15000.00"),
+        "account_last4": "4321",
     },
 )
 
@@ -104,9 +104,79 @@ IDFC_STANDING_INSTRUCTION = (
         "amount": Decimal("2399.00"),
         "merchant": "Anthropic",
         "txn_time": "2026-09-01T00:00:00+05:30",
-        "avl_limit": None,
-        "card_last4": "9876",
+        "reported_balance": None,
+        "account_last4": "9876",
     },
+)
+
+RBL_UPI_DEBIT = (
+    "RBL UPI debit (no time, no merchant)",
+    "VA-RBLBNK-S",
+    "Your a/c XX1111 is debited for Rs.658.36 on 02-09-26 and credited to "
+    "a/c XX2222 (UPI Ref 661188335104). Not you? pls forward this SMS to "
+    "8500000000 -RBL Bank",
+    {
+        "status": "parsed",
+        "type": "expense",
+        "amount": Decimal("658.36"),
+        # No business is named - only a destination account. merchant must
+        # stay null rather than being filled with an account number.
+        "merchant": None,
+        "counterparty": "XX2222",
+        "account_last4": "1111",
+        "reported_balance": None,
+        # THE CASE THAT MATTERS: this format has a date and no time, so
+        # txn_time falls back to midnight. Two same-amount payments on one day
+        # would collide on a derived key - the reference is what prevents it.
+        "upi_ref": "661188335104",
+    },
+)
+
+RBL_UPI_CREDIT = (
+    "RBL UPI credit (money in)",
+    "VA-RBLBNK-S",
+    "Your a/c no. XX1111 is credited for Rs.160.00 on 2026-09-02 10:51:35 "
+    "and debited from a/c no. XX3333 (UPI Ref no 105143193111)- RBL Bank",
+    {
+        "status": "parsed",
+        # Credited, so income - not an expense.
+        "type": "income",
+        "amount": Decimal("160.00"),
+        "merchant": None,
+        "account_last4": "1111",
+        "upi_ref": "105143193111",
+        # Different label ("UPI Ref no") and a different date format
+        # (YYYY-MM-DD with time) from the debit message on the SAME sender.
+        "txn_time": "2026-09-02T10:51:35+05:30",
+    },
+)
+
+BOB_UPI_DEBIT = (
+    "BOB UPI debit (VPA payee, AvlBal, colon dates)",
+    "VM-BOBSMS-S",
+    "Rs.340.00 Dr. from A/C XXXXXX4444 and Cr. to paytmqr6s4v8c@ptys. "
+    "Ref:623928991037. AvlBal:Rs7180.70(2026:08:27 08:01:42). "
+    "Not you? Call 18005700/5000-BOB",
+    {
+        "status": "parsed",
+        "type": "expense",
+        "amount": Decimal("340.00"),
+        "counterparty": "paytmqr6s4v8c@ptys",
+        "account_last4": "4444",
+        # AvlBal on a bank account, not Avl Limit on a card. Same column.
+        "reported_balance": Decimal("7180.70"),
+        "upi_ref": "623928991037",
+        # (2026:08:27 08:01:42) - colon-separated date, seen nowhere else.
+        "txn_time": "2026-08-27T08:01:42+05:30",
+    },
+)
+
+BOB_LINKING = (
+    "BOB account-linking notice (must be ignored)",
+    "VM-BOBSMS-S",
+    "We got a request for linking your account for UPI 4444. If its not you "
+    "kindly contact your bank on helpline no. 1800-5700 immediately -BOB",
+    {"status": "ignored"},
 )
 
 CASES = [
@@ -114,8 +184,12 @@ CASES = [
     AMEX_PAYMENT,
     IDFC_PURCHASE,
     IDFC_STANDING_INSTRUCTION,
+    RBL_UPI_DEBIT,
+    RBL_UPI_CREDIT,
+    BOB_UPI_DEBIT,
     OTP,
     PROMO,
+    BOB_LINKING,
 ]
 
 
@@ -138,8 +212,8 @@ def check(label, sender, body, expected):
     for field, want in expected.items():
         if field == "status":
             continue
-        if field == "card_last4":
-            have = result.card_last4
+        if field == "account_last4":
+            have = result.account_last4
         else:
             have = getattr(result.txn, field, None)
             if field == "txn_time":

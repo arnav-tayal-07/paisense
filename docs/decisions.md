@@ -253,3 +253,27 @@ Supporting choices in the same table:
 **Setting one due rule clears the other** (ADR 021 requires exactly one). Switching a card from "due 20 days after" to "due on the 8th" is one field in the request, not two. Without this the database check constraint would reject the obvious request and surface as a 500.
 
 **Validation sits in front of SQL, not behind it.** `CardIn` rejects both-or-neither due rules as a 422 naming the problem, rather than letting Postgres raise a constraint violation the user can't interpret. The constraint remains as the backstop that can't be bypassed.
+
+## 026 — Bank accounts, and a regex for the one field that must be exact
+
+**Context:** Real UPI messages arrived from RBL and Bank of Baroda. Every previous message had been a credit card message, and nothing in the schema fitted these.
+
+**The bug they exposed, which was live:** RBL's debit format carries a date and **no time**, so `txn_time` fell back to midnight. The derived dedupe key (ADR 017) is bank + card + timestamp + amount — so two UPI payments of the same amount on the same day produced an *identical* key and the second was silently discarded by `ON CONFLICT DO NOTHING`. No error, no review card, nothing in `/sms/unparsed`. For UPI, two small payments in a day is a normal Tuesday, not an edge case.
+
+**Decision, in four parts:**
+
+**1. `cards` becomes `accounts`, with a `kind`.** `XX7489` is a savings account, not a card. ADR 020 had already made this table the account rather than the plastic; this extends it to bank accounts. Statement days, due dates and credit limits are credit-card concepts, enforced by a conditional check so a bank account cannot acquire a due date the app would then remind you about.
+
+**2. `avl_limit` becomes `reported_balance`.** For a card, "available" is credit remaining. For a bank account it's money you have. Opposite meanings, identical arithmetic — both fall on a debit — so one column, named for what it actually is: what the bank said was left afterwards.
+
+**3. `upi_ref` is extracted by REGEX, not by the model.** This is the one place regex beats an LLM and the reason is exactness. A reference is a meaningless identifier — there is no context to reason from, so a model transposing one digit produces a string that looks entirely valid. And that string *is* the dedupe key: one wrong character means the same transaction inserts twice on the next re-scan, silently. A regex is exact or it fails; there is no "nearly right". Labels seen in real messages: `UPI Ref`, `UPI Ref no`, `Ref:`.
+
+The model is *also* asked for the reference — not to use, but so a disagreement can be surfaced. Regex wins; a mismatch flags for review. If the regex finds nothing and the model does, the model's value is used and flagged, because an unrecognised label is a format the pattern should learn.
+
+**4. `counterparty` is a new column.** RBL names no business at all, only a destination account (`XX7575`). BOB gives a UPI VPA (`paytmqr6s4v8c@ptys`). Neither is a merchant, and forcing them into `merchant` would produce a spending report full of raw account numbers.
+
+**The general principle, worth keeping:** use a model where meaning must be inferred, and a regex where characters must be copied. ADR 019 rejected regexes for *parsing* and that still holds — a pattern that encodes a message format breaks when the bank rewrites it. A pattern that copies an identifier after a label does not have that fragility, and gets the one guarantee an LLM cannot give.
+
+**Trade-off:** more columns, and the `accounts` rename touched every module. Cheap now with four transactions in the table; expensive after a year of data.
+
+**Verified across four banks and ten cases:** Axis, Amex, IDFC (purchase + standing instruction), RBL (debit with no time, credit with a different date format and label on the same sender), BOB (VPA payee, `AvlBal`, and a `(2026:08:27 08:01:42)` colon date format seen nowhere else) — plus an OTP, a marketing message and an account-linking notice, all correctly ignored.

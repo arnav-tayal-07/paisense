@@ -1,6 +1,6 @@
 """Card account lookup.
 
-An SMS gives you four or five digits. The transactions table wants a card_id
+An SMS gives you four or five digits. The transactions table wants a account_id
 pointing at an account. This is the bit in between, and it is deliberately
 cautious: a wrong link is worse than no link, because a transaction attributed
 to the wrong card quietly corrupts that card's totals, while an unlinked one
@@ -19,8 +19,8 @@ from psycopg import Connection
 # governs what's offered as current, not what history links to.
 _BY_ISSUER_AND_LAST4 = """
 select c.id
-from card_numbers n
-join cards c on c.id = n.card_id
+from account_numbers n
+join accounts c on c.id = n.account_id
 where n.last4 = %s
   and c.issuer_code is not null
   and upper(%s) like '%%' || upper(c.issuer_code) || '%%'
@@ -28,13 +28,13 @@ where n.last4 = %s
 
 _BY_LAST4 = """
 select distinct c.id
-from card_numbers n
-join cards c on c.id = n.card_id
+from account_numbers n
+join accounts c on c.id = n.account_id
 where n.last4 = %s
 """
 
 
-def resolve_card_id(conn: Connection, sender: str, last4: str | None) -> int | None:
+def resolve_account_id(conn: Connection, sender: str, last4: str | None) -> int | None:
     """Find the account a card number belongs to. None if unsure.
 
     Three outcomes, and the third is the one that matters:
@@ -59,20 +59,20 @@ def resolve_card_id(conn: Connection, sender: str, last4: str | None) -> int | N
     return None
 
 
-_INSERT_CARD = """
-insert into cards (name, issuer_code, statement_day, due_days_after, due_day, credit_limit)
-values (%s, %s, %s, %s, %s, %s)
+_INSERT_ACCOUNT = """
+insert into accounts (name, kind, issuer_code, statement_day, due_days_after, due_day, credit_limit)
+values (%s, %s, %s, %s, %s, %s, %s)
 returning *
 """
 
 _INSERT_NUMBER = """
-insert into card_numbers (card_id, last4, network)
+insert into account_numbers (account_id, last4, network)
 values (%s, %s, %s)
-on conflict (card_id, last4) do nothing
+on conflict (account_id, last4) do nothing
 returning *
 """
 
-_LIST_CARDS = """
+_LIST_ACCOUNTS = """
 select c.*,
        coalesce(
          json_agg(
@@ -82,17 +82,18 @@ select c.*,
          ) filter (where n.id is not null),
          '[]'
        ) as numbers
-from cards c
-left join card_numbers n on n.card_id = c.id
+from accounts c
+left join account_numbers n on n.account_id = c.id
 group by c.id
 order by c.id
 """
 
 
-def create_card(
+def create_account(
     conn: Connection,
     name: str,
-    statement_day: int,
+    kind: str = "credit_card",
+    statement_day: int | None = None,
     issuer_code: str | None = None,
     due_days_after: int | None = None,
     credit_limit=None,
@@ -105,32 +106,32 @@ def create_card(
     accident; the caller has to say which rule this card uses.
     """
     return conn.execute(
-        _INSERT_CARD,
-        (name, issuer_code, statement_day, due_days_after, due_day, credit_limit),
+        _INSERT_ACCOUNT,
+        (name, kind, issuer_code, statement_day, due_days_after, due_day, credit_limit),
     ).fetchone()
 
 
-def add_card_number(
-    conn: Connection, card_id: int, last4: str, network: str | None = None
+def add_account_number(
+    conn: Connection, account_id: int, last4: str, network: str | None = None
 ) -> dict | None:
     """Attach a physical card to an account.
 
     Returns None if that number is already on this account — re-adding is a
     no-op rather than an error, so setup can safely be re-run.
     """
-    return conn.execute(_INSERT_NUMBER, (card_id, last4, network)).fetchone()
+    return conn.execute(_INSERT_NUMBER, (account_id, last4, network)).fetchone()
 
 
-def list_cards(conn: Connection) -> list[dict]:
+def list_accounts(conn: Connection) -> list[dict]:
     """All accounts, each with its card numbers nested."""
-    return conn.execute(_LIST_CARDS).fetchall()
+    return conn.execute(_LIST_ACCOUNTS).fetchall()
 
 
-def get_card(conn: Connection, card_id: int) -> dict | None:
-    return conn.execute("select * from cards where id = %s", (card_id,)).fetchone()
+def get_account(conn: Connection, account_id: int) -> dict | None:
+    return conn.execute("select * from accounts where id = %s", (account_id,)).fetchone()
 
 
-def update_card(conn: Connection, card_id: int, changes: dict) -> dict | None:
+def update_account(conn: Connection, account_id: int, changes: dict) -> dict | None:
     """Partial update to an account. None if there's no such card.
 
     Setting one due rule clears the other. The database enforces that exactly
@@ -140,6 +141,7 @@ def update_card(conn: Connection, card_id: int, changes: dict) -> dict | None:
     """
     allowed = {
         "name",
+        "kind",
         "issuer_code",
         "statement_day",
         "due_day",
@@ -155,16 +157,16 @@ def update_card(conn: Connection, card_id: int, changes: dict) -> dict | None:
         fields["due_day"] = None
 
     if not fields:
-        return get_card(conn, card_id)
+        return get_account(conn, account_id)
 
     assignments = ", ".join(f"{col} = %s" for col in fields)
-    params = list(fields.values()) + [card_id]
+    params = list(fields.values()) + [account_id]
     return conn.execute(
-        f"update cards set {assignments} where id = %s returning *", params
+        f"update accounts set {assignments} where id = %s returning *", params
     ).fetchone()
 
 
-def set_number_active(conn: Connection, card_id: int, last4: str, is_active: bool) -> dict | None:
+def set_number_active(conn: Connection, account_id: int, last4: str, is_active: bool) -> dict | None:
     """Retire or restore a physical card.
 
     Retiring does not delete: historical SMS from a reissued card must still
@@ -172,6 +174,6 @@ def set_number_active(conn: Connection, card_id: int, last4: str, is_active: boo
     not what history links to.
     """
     return conn.execute(
-        "update card_numbers set is_active = %s where card_id = %s and last4 = %s returning *",
-        (is_active, card_id, last4),
+        "update account_numbers set is_active = %s where account_id = %s and last4 = %s returning *",
+        (is_active, account_id, last4),
     ).fetchone()
