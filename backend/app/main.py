@@ -12,6 +12,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Response
 from psycopg.errors import ForeignKeyViolation
 
+from .auth import require_api_key
 from .db import get_conn
 from .accounts import (
     add_account_number,
@@ -35,6 +36,11 @@ from .transactions import (
 )
 
 app = FastAPI(title="PaiSense API")
+
+# Every route except /health and the docs needs X-API-Key. Registered as
+# middleware rather than per-route so a new endpoint is protected by
+# default - forgetting to add a dependency is how endpoints leak.
+app.middleware("http")(require_api_key)
 
 
 @app.get("/health")

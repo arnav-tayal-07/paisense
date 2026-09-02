@@ -299,3 +299,23 @@ The model is *also* asked for the reference — not to use, but so a disagreemen
 **Rejected alternative worth recording:** a tiny native SMS forwarder plus a web UI on Vercel. It would have put most of the work in JavaScript and produced a shareable URL, but due-date reminders (ADR 005) and the biometric gate (ADR 007) both need a real app, so the native app was needed regardless — and building two things is worse than building one.
 
 **Not affected:** ADR 001 (parsing stays server-side), 005 (reminders on-device), 006 (voice on-device), 007 (fingerprint gate). Those decisions were about *where* logic runs, not which framework runs it.
+
+## 028 — Single user now, multi-user later; a shared API key in the meantime
+
+**Context:** Arnav wants PaiSense multi-user eventually, but personal and simple while he's learning. Meanwhile the deployed API had no authentication at all, and its URL was committed to a **public** repository.
+
+**Decision:** Stay single-user. Add one shared secret (`X-API-Key`) as middleware over every route except `/health` and the docs. Real per-user authentication waits until multi-user is actually wanted.
+
+**Why not build multi-user now:** the schema half is cheap to defer — adding `user_id` to four tables is an `ALTER TABLE`, a backfill of `1`, and a `NOT NULL`. The expensive half is authentication, and that costs the same whenever it's built. Nothing is saved by doing it early, and it would slow down every feature in between.
+
+**Why the key could not wait:** the API was open to anyone who read the repo. `GET /transactions` exposed every row, `POST /sms` burned Gemini quota, and `DELETE /transactions/{id}` destroyed data. Four test rows made it low-stakes on the day; real spending would not have.
+
+**Three implementation details that matter:**
+
+- **Middleware, not a per-route dependency.** A new endpoint is protected by default. Remembering to add a decorator is exactly how endpoints leak.
+- **Fail closed.** An unset `PAISENSE_API_KEY` returns 503, never "allow everyone". A missing environment variable must not silently reopen the database.
+- **`hmac.compare_digest`, not `==`.** A plain string comparison returns as soon as characters differ, so its timing leaks how much of the key was correct. Overkill at this scale; costs one import.
+
+**`/health` stays open** — the keepalive workflow pings it and it reveals nothing beyond "the server is up". `/docs` stays open too: it describes the shape of the API, not the data.
+
+**Note on patterns and ownership:** when the LLM-generated regex patterns (ADR 029) arrive, they are the one thing that should *not* become per-user. An SMS format belongs to a bank, not to a customer — RBL's message shape is identical for everyone. In a multi-user world, transactions are per-user and patterns are shared, so one user hitting a new bank format teaches it for everybody.
