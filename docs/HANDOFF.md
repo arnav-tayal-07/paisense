@@ -1,7 +1,7 @@
 # Session handoff — continue here
 
 > **For any AI assistant picking this project up: read this file, then [decisions.md](decisions.md), before doing anything.**
-> Last updated: 2026-08-30 (Phase 2 complete, migration 001 applied, Phase 3 approach **under review — see Open decisions**).
+> Last updated: 2026-08-30 (**Phases 1–3 complete** — SMS ingestion verified end to end on real messages).
 
 ## The one rule that overrides everything
 
@@ -15,88 +15,123 @@
 
 | Item | Status |
 |---|---|
-| Architecture + all decisions | ✅ documented in [decisions.md](decisions.md) (ADR 001–010) |
+| Architecture + all decisions | ✅ [decisions.md](decisions.md), ADR 001–023 |
 | GitHub repo | ✅ https://github.com/arnav-tayal-07/paisense |
-| Supabase project | ✅ `paisense`, region Mumbai, Data API disabled, RLS on |
-| `backend/.env` with DATABASE_URL | ✅ exists locally (session pooler string), connection tested OK, git-ignored |
-| Python venv | ✅ `backend/.venv` — fastapi, uvicorn, psycopg[binary], python-dotenv |
-| `cards` table | ✅ created in Supabase (via SQL editor, RLS enabled) |
-| `transactions` table | ✅ created in Supabase, verified — see [schema.sql](../backend/schema.sql) and ADR 011 |
-| `backend/schema.sql` | ✅ complete and verified against the live DB — both tables, indexes, RLS |
-| FastAPI app code | ✅ Phase 2 complete — `/health` + full transactions CRUD, all verified against the live DB |
+| Supabase project | ✅ `paisense`, Mumbai, Data API disabled, RLS on every table |
+| `backend/.env` | ✅ `DATABASE_URL` + `GEMINI_API_KEY`, git-ignored |
+| Python venv | ✅ `backend/.venv` — fastapi, uvicorn, psycopg[binary], python-dotenv, httpx |
+| Schema | ✅ 4 tables + 4 migrations, live DB verified against [schema.sql](../backend/schema.sql) |
+| Transactions API | ✅ full CRUD with filtering |
+| SMS ingestion | ✅ LLM extraction, raw audit trail, replay on failure |
+| Real data in DB | ✅ 1 card account (IDFC, 2 numbers), 4 transactions, 3 raw_sms |
+| Card management routes | ❌ data functions exist, no endpoints — **next step** |
+| Agent (Phase 4) | ❌ not started |
+| Automated tests | ❌ none — carried debt |
 
 Run it from `backend\`: `.\.venv\Scripts\uvicorn.exe app.main:app --reload`, then http://127.0.0.1:8000/docs
 (PowerShell needs the leading `.\` and you must be in `backend\`, not the repo root.)
 
-Files: [db.py](../backend/app/db.py) connection, [models.py](../backend/app/models.py) Pydantic, [transactions.py](../backend/app/transactions.py) SQL, [main.py](../backend/app/main.py) routes.
+## Where the code lives
+
+| File | Holds |
+|---|---|
+| [main.py](../backend/app/main.py) | every route. HTTP only — status codes, query params |
+| [db.py](../backend/app/db.py) | `get_conn()`, one connection per use, `.env` by absolute path |
+| [models.py](../backend/app/models.py) | Pydantic shapes: `SmsIn`, `TransactionIn` |
+| [transactions.py](../backend/app/transactions.py) | all transaction SQL, incl. the `ON CONFLICT` dedupe |
+| [cards.py](../backend/app/cards.py) | card SQL + `resolve_card_id` (last4 → account) |
+| [sms.py](../backend/app/sms.py) | prompt, JSON schema, guardrails. **No database** |
+| [llm.py](../backend/app/llm.py) | provider interface, Gemini REST, model fallback chain |
+| [ingest.py](../backend/app/ingest.py) | orchestration: store → extract → link → record |
+| [check_sms.py](../backend/check_sms.py) | manual extraction test. Costs quota to run |
+
+**Layering rule that's worth keeping:** routes do HTTP, `*.py` data modules do SQL, `sms.py` does parsing and touches no database, `ingest.py` is the only thing that coordinates across them. That's why the extractor could be tested against six messages without a database, and why swapping Gemini out means editing one file.
 
 ## The API as it stands
 
 | Route | Behaviour |
 |---|---|
 | `GET /health` | server + DB reachability |
-| `POST /transactions` | 201 created, 200 + existing row on duplicate `upi_ref` (ADR 012), 400 on bad `card_id`, 422 on bad type/amount |
-| `GET /transactions` | newest first by `txn_time`; optional `type`, `category`, `merchant` (partial, case-insensitive), `start`, `end`; `limit` 1–200 default 50 |
+| `POST /transactions` | 201 created, 200 + existing row on duplicate `dedupe_key` (ADR 012), 400 bad card, 422 validation |
+| `GET /transactions` | newest first by `txn_time`; filters `type`, `category`, `merchant` (partial, case-insensitive), `card_id`, `start`, `end`; `limit` 1-200 default 50 |
 | `GET /transactions/{id}` | one row, 404 if absent |
-| `DELETE /transactions/{id}` | 204 on success, 404 if absent (ADR 014) |
+| `DELETE /transactions/{id}` | 204, 404 if absent (ADR 014) |
+| `POST /sms` | store raw, extract, link card, insert. **Always 200** - an unparseable SMS is a recorded outcome, not a failed request |
+| `GET /sms/unparsed` | `pending` + `failed` messages. The format-change alarm |
+| `POST /sms/reprocess` | replay failures. Safe because `dedupe_key` makes re-insert a no-op |
 
 Phase 4's agent tools map straight onto the GET filters: `monthly_total` is `start`/`end`, `search` is `merchant`.
 
-## ⚠️ Open decisions — resolve these BEFORE writing any parser code
+## How a request flows
 
-Phase 3 stalled deliberately on an architecture question Arnav raised: *"why don't we find a universal way that works on any bank, any format, and needs no updating?"* That is a fair objection and regexes cannot meet it — a regex encodes a format and breaks when the format changes.
+```
+POST /sms  {sender, message, sms_sent_at}
+   |
+   main.py            route, validates against SmsIn
+   |
+   ingest.py  store_raw()      -> INSERT raw_sms, COMMIT, connection closed
+   |                              (before extraction, on purpose - ADR 018)
+   |
+   ingest.py  process_raw()
+   |    |
+   |    sms.py    extract()    -> builds prompt + JSON schema
+   |    |    llm.py            -> Gemini REST, walks the model chain on 429
+   |    |    sms.py            -> guardrails: amount must appear in the text
+   |    |                         strings -> Decimal, ISO -> datetime
+   |    |                      -> Extraction(parsed | ignored | failed)
+   |    |
+   |    cards.py   resolve_card_id()   last4 -> account, or None if ambiguous
+   |    transactions.py create_transaction()  ON CONFLICT (dedupe_key)
+   |    |
+   |    UPDATE raw_sms SET parse_status, transaction_id
+   |
+   200 {raw_sms: {...}, duplicate: false}
+```
 
-**Do not just fill in the regex stubs in [app/sms.py](../backend/app/sms.py).** They exist as scaffolding from before this question came up. The approach is genuinely unsettled.
+Nothing below `main.py` knows about HTTP; `sms.py` never touches the database; `ingest.py` is the only module that coordinates across layers.
 
-Options discussed, with the trade-offs:
+## Extraction: LLM, no regexes (ADRs 019, 022, 023)
 
-| Approach | Universal? | Survives reformat? | Privacy |
-|---|---|---|---|
-| Per-bank regex | No | No — fails silently | Nothing leaves the server |
-| LLM extraction | Yes | Yes | Every message goes to a provider |
-| **Regex + LLM fallback** | Yes | Yes | Known banks stay local; only unknown formats go out |
+Message goes to Gemini with a constrained JSON schema at temperature 0. No per-bank patterns exist and none are wanted - a regex encodes a format and breaks when a bank changes it.
 
-**Assistant's recommendation: the hybrid.** Regexes handle Axis and Amex locally — free, instant, private. Anything unrecognised, including Axis after a reformat, falls through to the LLM and keeps working. That makes regex maintenance *optional* rather than mandatory, which was Arnav's actual objection.
+Handles with no bank-specific code: `27-08-26`, `29/08/2026` and `07 AUG 2026`; 12-hour time (`08:38 PM` -> `20:38`); Amex's five-digit suffix; a payee named mid-sentence with no keyword; OTPs and marketing rejected.
 
-Three unresolved questions:
+**Two guardrails - do not remove:**
+- Every schema field is **required AND nullable**. With only `is_transaction` required, the model returned `{is_transaction, type}` and nothing else on noisy messages.
+- The extracted amount must **literally appear** in the message. An invented number is the one failure mode that would otherwise be silent.
 
-1. **Hybrid or LLM-only?**
-2. **Free tier or a no-training paid tier?** ADR 009 accepted Gemini free tier's "prompts may be used for product improvement" clause *explicitly because test data was fake*. Real bank SMS is the case it was not accepted for. At ~600 messages/month the paid cost is pennies, so cost is not the deciding factor. **Suggested split: free tier for development with fake fixtures, no-training tier before the first real SMS.** The risk is drift — "we'll switch later" becoming "we forgot".
-3. **Which provider?** Phase 4's agent needs the same client, so decide once.
+**Model choice is a quota decision, not a quality one.** `gemini-3.6-flash` allows 20 requests **per day** on free tier. Quota is per-model, so `llm.py` walks a chain of five and falls through on 429/404/503/timeout, remembering what worked. `GEMINI_MODEL` pins one; `GEMINI_MODELS` overrides the chain.
 
-Arnav also asked whether a separate Google account fixes the privacy issue. It does not — the terms attach to the tier, not the identity, and account creation wants a phone number anyway. Worth doing for credential hygiene (blast radius if a key leaks), not as a privacy fix.
+## The exact next step
 
-## Also agreed but not built: `raw_sms` table
+**Card management routes.** [cards.py](../backend/app/cards.py) has `create_card`, `add_card_number`, `list_cards`, `resolve_card_id` - but no endpoints, so cards can only be created from a Python shell. Needed for the app's edit button:
 
-Store every incoming message — sender, body, received-at, nullable FK to the transaction it produced. Needed under **every** option above. It turns a format change from data loss into a backlog: messages are never lost, the regex or prompt gets fixed later, and re-parsing is safe because `dedupe_key` collides on anything already inserted. Also gives a `GET /sms/unparsed` early-warning list. Migration not yet written.
+| `POST /cards` | create an account |
+| `GET /cards` | list with numbers nested |
+| `PATCH /cards/{id}` | edit statement/due day when the bank changes it |
+| `POST /cards/{id}/numbers` | add a replacement card |
 
-## Phase 3 shape, once the above is settled
+Then **Phase 4 - the agent.** `llm.py` already provides the provider interface it needs.
 
-`POST /sms` takes `{sender, message}`, stores the raw message, extracts a `TransactionIn`, and calls the existing `create_transaction()`. Dedupe already works on `dedupe_key` (tested), so re-scanning the inbox is safe from day one. Extraction happens server-side (ADR 001) so a bank changing format doesn't need a new APK.
+## Carried debt
 
-**Route on the sender header, not the body.** `AX-AXISBK-S`, `TX-AMEXIN-S` — the DLT header is registered and stable, and Amex's message never names the bank at all. `HANDLERS` in `sms.py` matches the middle segment, so `AX-AXISBK-S` and `VM-AXISBK-S` both resolve to Axis.
+- **No automated tests.** `check_sms.py` is a manual script and costs API quota to run. There is no regression net.
+- No `PATCH /transactions` - a transaction can be created and deleted but not corrected.
+- `POST /transactions` shows "Undocumented" beside its 201; fix with `responses={...}`.
+- Two leftover manual test rows in `transactions` (ids 1, 2 - Zomato and Auto). Delete when convenient.
 
-**Real message formats observed** (values altered in the committed fixtures — the repo is public):
+## Schema state - settled, don't revisit
 
-- Axis spend: five lines, `Spent INR 845` / `Axis Bank Card no. XX7851` / `27-08-26 17:31:03 IST` / merchant on its own line / `Avl Limit: INR ...`
-- Amex payment: one line, `INR 3,230.00`, `***71003` (**five** digits), `29/08/2026`, no time, no merchant
-- Differences that matter: comma-vs-no-comma amounts, `DD-MM-YY` vs `DD/MM/YYYY`, time present vs absent
+Four tables, four migrations, all applied and verified against [schema.sql](../backend/schema.sql):
 
-**Non-transaction messages must return `None`.** OTPs and marketing arrive on the same sender header. `check_sms.py` includes an OTP case that must be ignored — a parser that matches too loosely writes junk that surfaces weeks later as a mystery expense.
+- `cards` - the ACCOUNT: one limit, one statement day, one due rule
+- `card_numbers` - the physical cards on it (Visa + RuPay share one account)
+- `transactions` - the money
+- `raw_sms` - every message, stored before parsing
 
-**Carried debt, deal with it before Phase 5 deploy:**
+RLS gotcha: policy-less RLS is deny-all, but the backend connects as the table owner through the session pooler and owners bypass RLS - so it works today. If the Data API is ever re-enabled or a non-owner role used, tables read as EMPTY rather than erroring. Fails silent, not loud.
 
-- **No tests.** Everything to date was verified by hand or by throwaway scripts. There is no regression net, and Phase 3 will be editing these exact routes.
-- `POST` shows "Undocumented" beside its 201 because the status is set dynamically rather than declared — cosmetic, fix with `responses={...}`.
-- No `PATCH` — a transaction can be created and deleted but not corrected.
-
-## Schema state — settled, don't revisit
-
-Both tables exist in Supabase, `schema.sql` mirrors them exactly (verified column-by-column and via `pg_class`), both have RLS enabled with **zero policies**.
-
-RLS gotcha: policy-less RLS is deny-all, but the backend connects as the table owner through the session pooler and owners bypass RLS — so it works today. If the Data API is ever re-enabled or a non-owner role is used, both tables read as empty rather than erroring. Fails silent, not loud.
-
-Test data currently in `transactions`: 2 rows (ids 1 and 2, Zomato and Auto). Delete them before real data goes in.
+Real data currently in the DB: card account 3 (IDFC FIRST, statement 24, due day 8, numbers 7714 Visa + 3577 RuPay), 4 transactions, 3 raw_sms.
 
 ## Known gotcha for Phase 6
 
@@ -110,14 +145,18 @@ Test data currently in `transactions`: 2 rows (ids 1 and 2, Zomato and Auto). De
 
 **2026-08-30 (later, Phase 3 start).** He asked directly whether it's bad to understand concepts but not be able to write the code, and then whether he could just have code written and focus on understanding it. Answered honestly: recognition isn't recall, and regexes are the worst file to not own because he alone maintains them when a bank reformats. He then chose to write both parsers himself — **unprompted, and the strongest choice he's made**. Before starting he pushed back on the whole approach ("why not a universal method"), which was a better question than the task he'd been given and changed the plan. Two things follow: he engages far more with architecture than with syntax, and leading with the *why* gets more out of him than leading with the code. Diagnosis that seems to hold: concepts are ahead of syntax, and he stalls on blank pages, not on hard ideas.
 
+**2026-08-30 (Phase 3 build).** All code assistant-written at his direction, and he steered rather than typed — which on this phase was the higher-value contribution. Three of his interventions changed the architecture: *"why not a universal method that needs no updating"* killed regexes in favour of LLM extraction (ADR 019); *"can we switch models automatically when quota runs out"* produced the fallback chain (ADR 023); and *"ask once for statement and due date, with an edit button"* confirmed storing the rule rather than dates. He also supplied the real SMS that broke four schema assumptions.
+
 **How to run the rule (updated):** "never hand over finished code" is the default, not an absolute. Push back **once**, briefly, with a concrete alternative — then do what he picks without arguing again. Repeated refusal is friction, not teaching. He does engage when the target is small and unambiguous (three named blanks worked; a blank page did not). Prefer worked-example-then-parallel-task over blank-page assignments. Avoid `...` and `???` as blanks — he pasted them literally as code, reasonably.
 
-## Phase plan (Phase 3 next)
+**Where he's strongest:** architecture and requirements. He questions the approach before accepting a task, and has been right every time. Lead with the *why* and the design trade-off; he'll engage and often improve it. Leading with code loses him.
+
+## Phase plan (Phase 4 next)
 
 1. ✅ Backend skeleton + DB connection + schema — done and verified
 2. ✅ Expense/income API — full CRUD with filtering, verified against the live DB
-3. SMS parser — he supplies real anonymized bank SMS; he writes regexes; dedupe by upi_ref
-4. Agent — **Gemini Flash free tier** (ADR 009), function calling, tools: add/delete/search expenses, monthly totals, income, card spends, dues. Provider behind a swappable interface. Text chat first.
+3. ✅ SMS ingestion — LLM extraction (no regexes, ADR 019), `raw_sms` audit trail, replay on failure. Verified on real Axis/Amex/IDFC messages
+4. Agent — Gemini via the existing `llm.py` interface, function calling, tools: add/delete/search expenses, monthly totals, income, card spends, dues. Text chat first.
 5. Deploy — Render free tier (backend) + this Supabase DB
 6. Expo React Native app (TypeScript) — screens, then on-device voice (expo-speech-recognition + expo-speech), fingerprint gate (expo-local-authentication), local notifications 7/3/1 days before card due dates, expo-calendar for due-date events
 7. APK via EAS cloud build
