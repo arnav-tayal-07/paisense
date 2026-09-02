@@ -238,3 +238,18 @@ Supporting choices in the same table:
 **The real design risk is review fatigue.** A queue that flags everything gets tapped through without reading, which produces *false* confidence — worse than no review. So the triggers are deliberately narrow: models disagreed, amount equals the available limit, or the card isn't registered. Everything else is `auto` and never surfaces. If the queue turns out too noisy or too quiet, the thresholds move; the mechanism doesn't.
 
 **Unreviewed rows do not count.** `list_transactions` defaults to `auto` + `confirmed` only. If flagged rows still counted toward totals, flagging them would achieve nothing.
+
+## 025 — PATCH semantics: send only what changed
+
+**Context:** The review card needs a third option. Tick and cross don't cover the common case — "yes I bought that, but it was ₹2,000 not ₹10,170" — and without an edit, correcting a wrong amount meant rejecting a real transaction and losing it.
+**Decision:** `PATCH /transactions/{id}` and `PATCH /cards/{id}`, both partial: only fields present in the request body are written, using Pydantic's `exclude_unset`.
+**Why partial and not PUT:** sending `{"amount": "2000"}` must not blank the merchant. A PUT would require the client to echo back every field it isn't changing, which turns every edit into a read-modify-write and makes concurrent edits destructive.
+**Column names come from a fixed allow-list**, never from the request body — the update statement is assembled from known column names with values still passed as `%s` (ADR 013). A request key that isn't in the list is ignored rather than interpolated.
+
+**Not editable on a transaction:** `dedupe_key` (changing it would let the same SMS insert a second row on the next re-scan), `source`, and `created_at`. Those describe how the row came to exist, not what it says.
+
+**PATCH does not change `review_status`.** Editing a value and accepting it are separate decisions; collapsing them would mean a stray edit silently marks something reviewed. The app calls PATCH then confirm — two calls, unambiguous semantics.
+
+**Setting one due rule clears the other** (ADR 021 requires exactly one). Switching a card from "due 20 days after" to "due on the 8th" is one field in the request, not two. Without this the database check constraint would reject the obvious request and surface as a 500.
+
+**Validation sits in front of SQL, not behind it.** `CardIn` rejects both-or-neither due rules as a 422 naming the problem, rather than letting Postgres raise a constraint violation the user can't interpret. The constraint remains as the backstop that can't be bypassed.

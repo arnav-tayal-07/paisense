@@ -228,6 +228,35 @@ def get_transaction(conn: Connection, txn_id: int) -> dict | None:
 
 # `returning id` is what makes this tell the difference between "deleted one
 # row" and "there was nothing to delete". A bare DELETE succeeds either way.
+def update_transaction(conn: Connection, txn_id: int, changes: dict) -> dict | None:
+    """Apply a partial update. None if there's no such row.
+
+    Column names come from a fixed allow-list, never from the request — the
+    caller passes a Pydantic model's `exclude_unset` dump, so only fields the
+    client actually sent are present, and only known columns are accepted.
+    Values still travel as %s parameters (ADR 013).
+    """
+    allowed = {
+        "type",
+        "amount",
+        "merchant",
+        "category",
+        "txn_time",
+        "payment_method",
+        "card_id",
+        "note",
+    }
+    fields = {k: v for k, v in changes.items() if k in allowed}
+    if not fields:
+        return conn.execute(_SELECT_BY_ID, (txn_id,)).fetchone()
+
+    assignments = ", ".join(f"{col} = %s" for col in fields)
+    params = list(fields.values()) + [txn_id]
+    return conn.execute(
+        f"update transactions set {assignments} where id = %s returning *", params
+    ).fetchone()
+
+
 _DELETE_BY_ID = "delete from transactions where id = %s returning id"
 
 

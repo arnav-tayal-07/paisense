@@ -60,8 +60,8 @@ def resolve_card_id(conn: Connection, sender: str, last4: str | None) -> int | N
 
 
 _INSERT_CARD = """
-insert into cards (name, issuer_code, statement_day, due_days_after, credit_limit)
-values (%s, %s, %s, %s, %s)
+insert into cards (name, issuer_code, statement_day, due_days_after, due_day, credit_limit)
+values (%s, %s, %s, %s, %s, %s)
 returning *
 """
 
@@ -94,13 +94,19 @@ def create_card(
     name: str,
     statement_day: int,
     issuer_code: str | None = None,
-    due_days_after: int = 20,
+    due_days_after: int | None = None,
     credit_limit=None,
+    due_day: int | None = None,
 ) -> dict:
-    """Create a card account. Numbers are added separately."""
+    """Create a card account. Numbers are added separately.
+
+    Exactly one of due_day / due_days_after must be set — the database
+    enforces it (ADR 021). Both default to None so neither is set by
+    accident; the caller has to say which rule this card uses.
+    """
     return conn.execute(
         _INSERT_CARD,
-        (name, issuer_code, statement_day, due_days_after, credit_limit),
+        (name, issuer_code, statement_day, due_days_after, due_day, credit_limit),
     ).fetchone()
 
 
@@ -118,3 +124,54 @@ def add_card_number(
 def list_cards(conn: Connection) -> list[dict]:
     """All accounts, each with its card numbers nested."""
     return conn.execute(_LIST_CARDS).fetchall()
+
+
+def get_card(conn: Connection, card_id: int) -> dict | None:
+    return conn.execute("select * from cards where id = %s", (card_id,)).fetchone()
+
+
+def update_card(conn: Connection, card_id: int, changes: dict) -> dict | None:
+    """Partial update to an account. None if there's no such card.
+
+    Setting one due rule clears the other. The database enforces that exactly
+    one is set, so sending `due_day` on a card that currently uses
+    `due_days_after` would otherwise violate the constraint and surface as a
+    500 — when what the user meant was obviously "switch to a fixed day".
+    """
+    allowed = {
+        "name",
+        "issuer_code",
+        "statement_day",
+        "due_day",
+        "due_days_after",
+        "credit_limit",
+        "is_active",
+    }
+    fields = {k: v for k, v in changes.items() if k in allowed}
+
+    if "due_day" in fields and "due_days_after" not in fields:
+        fields["due_days_after"] = None
+    elif "due_days_after" in fields and "due_day" not in fields:
+        fields["due_day"] = None
+
+    if not fields:
+        return get_card(conn, card_id)
+
+    assignments = ", ".join(f"{col} = %s" for col in fields)
+    params = list(fields.values()) + [card_id]
+    return conn.execute(
+        f"update cards set {assignments} where id = %s returning *", params
+    ).fetchone()
+
+
+def set_number_active(conn: Connection, card_id: int, last4: str, is_active: bool) -> dict | None:
+    """Retire or restore a physical card.
+
+    Retiring does not delete: historical SMS from a reissued card must still
+    resolve to the right account. is_active governs what's offered as current,
+    not what history links to.
+    """
+    return conn.execute(
+        "update card_numbers set is_active = %s where card_id = %s and last4 = %s returning *",
+        (is_active, card_id, last4),
+    ).fetchone()

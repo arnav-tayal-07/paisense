@@ -10,7 +10,78 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class TransactionPatch(BaseModel):
+    """Fields a user may correct on an existing transaction.
+
+    Every field optional: a PATCH sends only what changed. Anything omitted
+    is left alone, which is what distinguishes PATCH from PUT — sending
+    `{"amount": "2000"}` must not blank out the merchant.
+
+    Deliberately NOT editable: `dedupe_key` (changing it would let the same
+    SMS insert a second row on the next re-scan), `source`, and `created_at`.
+    """
+
+    type: Optional[Literal["expense", "income", "card_payment"]] = None
+    amount: Optional[Decimal] = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    merchant: Optional[str] = None
+    category: Optional[str] = None
+    txn_time: Optional[datetime] = None
+    payment_method: Optional[str] = None
+    card_id: Optional[int] = None
+    note: Optional[str] = None
+
+
+class CardIn(BaseModel):
+    """A credit account. The physical cards on it are added separately."""
+
+    name: str
+    statement_day: int = Field(ge=1, le=31)
+
+    # DLT sender segment: IDFCFB, AXISBK, AMEXIN. Used to disambiguate when
+    # two banks issue cards ending in the same digits.
+    issuer_code: Optional[str] = None
+
+    # Exactly one due rule, mirroring the database check constraint. Real
+    # cards use both styles: "due on the 8th" and "due 20 days after".
+    due_day: Optional[int] = Field(default=None, ge=1, le=31)
+    due_days_after: Optional[int] = Field(default=None, ge=1, le=60)
+
+    credit_limit: Optional[Decimal] = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+
+    @model_validator(mode="after")
+    def exactly_one_due_rule(self):
+        # Caught here as a clear 422 rather than as a constraint violation
+        # surfacing from Postgres as a 500.
+        if (self.due_day is None) == (self.due_days_after is None):
+            raise ValueError("set exactly one of due_day or due_days_after")
+        return self
+
+
+class CardPatch(BaseModel):
+    """Partial update to an account — the app's edit button.
+
+    No due-rule validator here: a PATCH may legitimately send only `due_day`,
+    and the database check constraint is the backstop. The route clears the
+    other field when one is set, so the two can never both be populated.
+    """
+
+    name: Optional[str] = None
+    issuer_code: Optional[str] = None
+    statement_day: Optional[int] = Field(default=None, ge=1, le=31)
+    due_day: Optional[int] = Field(default=None, ge=1, le=31)
+    due_days_after: Optional[int] = Field(default=None, ge=1, le=60)
+    credit_limit: Optional[Decimal] = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    is_active: Optional[bool] = None
+
+
+class CardNumberIn(BaseModel):
+    """One physical card on an account."""
+
+    last4: str = Field(pattern=r"^[0-9]{4,6}$")
+    network: Optional[Literal["visa", "rupay", "mastercard", "amex", "diners", "other"]] = None
 
 
 class SmsIn(BaseModel):

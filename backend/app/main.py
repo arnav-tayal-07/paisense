@@ -13,8 +13,16 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from psycopg.errors import ForeignKeyViolation
 
 from .db import get_conn
+from .cards import (
+    add_card_number,
+    create_card,
+    get_card,
+    list_cards,
+    set_number_active,
+    update_card,
+)
 from .ingest import ingest, list_ignored, list_unparsed, reprocess_failed
-from .models import SmsIn, TransactionIn
+from .models import CardIn, CardNumberIn, CardPatch, SmsIn, TransactionIn, TransactionPatch
 from .transactions import (
     create_transaction,
     delete_transaction,
@@ -23,6 +31,7 @@ from .transactions import (
     list_transactions,
     reconcile_card,
     set_review,
+    update_transaction,
 )
 
 app = FastAPI(title="PaiSense API")
@@ -149,6 +158,98 @@ def post_reject_transaction(txn_id: int):
         row = set_review(conn, txn_id, "rejected")
     if row is None:
         raise HTTPException(status_code=404, detail=f"No transaction {txn_id} awaiting review")
+    return row
+
+
+@app.patch("/transactions/{txn_id}")
+def patch_transaction(txn_id: int, changes: TransactionPatch):
+    """Correct a transaction. Only the fields you send are touched.
+
+    The main use is the review card: often the honest answer isn't tick or
+    cross but "yes I bought that, it was ₹2,000 not ₹10,170". Without this
+    you'd have to reject a real transaction and lose it.
+
+    Does NOT change review_status — confirm is a separate, deliberate act.
+    Editing a value and accepting it are different decisions, and collapsing
+    them would mean a stray edit silently marks something reviewed.
+    """
+    try:
+        with get_conn() as conn:
+            row = update_transaction(conn, txn_id, changes.model_dump(exclude_unset=True))
+    except ForeignKeyViolation:
+        raise HTTPException(status_code=400, detail=f"card_id {changes.card_id} does not exist")
+
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No transaction with id {txn_id}")
+    return row
+
+
+@app.post("/cards", status_code=201)
+def post_card(card: CardIn):
+    """Create a credit account. Card numbers are added separately.
+
+    An account is the thing with one limit, one statement day and one due
+    date; the physical cards on it are a different table (ADR 020).
+    """
+    with get_conn() as conn:
+        return create_card(
+            conn,
+            name=card.name,
+            statement_day=card.statement_day,
+            issuer_code=card.issuer_code,
+            due_days_after=card.due_days_after,
+            credit_limit=card.credit_limit,
+            due_day=card.due_day,
+        )
+
+
+@app.get("/cards")
+def get_cards():
+    """All accounts, each with its physical cards nested."""
+    with get_conn() as conn:
+        return list_cards(conn)
+
+
+@app.patch("/cards/{card_id}")
+def patch_card(card_id: int, changes: CardPatch):
+    """Edit an account — the app's edit button.
+
+    Setting one due rule clears the other, so switching from "due 20 days
+    after" to "due on the 8th" is a single field, not two.
+    """
+    with get_conn() as conn:
+        row = update_card(conn, card_id, changes.model_dump(exclude_unset=True))
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No card with id {card_id}")
+    return row
+
+
+@app.post("/cards/{card_id}/numbers", status_code=201)
+def post_card_number(card_id: int, number: CardNumberIn):
+    """Attach a physical card. Re-adding an existing one is a no-op."""
+    with get_conn() as conn:
+        if get_card(conn, card_id) is None:
+            raise HTTPException(status_code=404, detail=f"No card with id {card_id}")
+        row = add_card_number(conn, card_id, number.last4, number.network)
+        if row is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{number.last4} is already on card {card_id}",
+            )
+        return row
+
+
+@app.patch("/cards/{card_id}/numbers/{last4}")
+def patch_card_number(card_id: int, last4: str, is_active: bool):
+    """Retire or restore a physical card after reissue.
+
+    Never deletes: an old SMS from the replaced card must still resolve to
+    this account, so history survives a reissue.
+    """
+    with get_conn() as conn:
+        row = set_number_active(conn, card_id, last4, is_active)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"{last4} is not on card {card_id}")
     return row
 
 
