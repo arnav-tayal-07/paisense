@@ -207,3 +207,34 @@ Supporting choices in the same table:
 **It remembers what worked.** The last successful model is tried first next time, so a healthy fallback isn't re-tested against an exhausted primary on every message. The chain wraps around rather than truncating, so once daily quotas reset it drifts back to the preferred model on its own.
 
 **Configuration:** `GEMINI_MODEL` pins one model (for testing a specific one); `GEMINI_MODELS` overrides the whole chain as a comma-separated list. The default chain was verified against the live API — 2.5-series models return 404 on this key and are excluded.
+
+## 024 — Human review for what the guardrails can't catch
+
+**Context:** Arnav asked what happens if the model hallucinates an amount or misses a transaction entirely. Auditing the answer honestly turned up three failures the existing guardrail does not cover, on top of the one it does.
+
+| Failure | Before | Now |
+|---|---|---|
+| Provider down / out of quota | ✅ `failed`, replayed | unchanged |
+| Invented amount not in the message | ✅ rejected | unchanged |
+| Model calls a real spend "not a transaction" | ❌ **silently dropped** | second opinion, then `needs_review` |
+| Model picks the wrong *real* number | ❌ **passes the guardrail** | flagged when it equals `avl_limit` |
+| Transaction whose card can't be resolved | ❌ stored unlinked, invisible | flagged for review |
+| Transaction that never generated an SMS | ❌ undetectable | caught by reconciliation |
+
+**Decision:** Add `transactions.review_status` (`auto` / `pending` / `confirmed` / `rejected`) with a queue the user ticks or crosses, plus a reconciliation check against the bank's own available-limit figures.
+
+**Why the amount guardrail was never enough.** It verifies the amount *appears* in the message. Every IDFC message contains two candidate numbers — the spend and `Avbl Limit` — so picking the wrong one passes the check. A ₹10,170 coffee would have sailed through. The narrow fix: if the extracted amount exactly equals the extracted available limit, the wrong number was chosen. A purchase for precisely your remaining limit, to the paisa, does not happen.
+
+**Why a "no" from the model is no longer trusted on its own.** `ignored` rows are excluded from the alarm list so OTPs don't bury real failures — which also made a wrongly-ignored spend invisible forever. Now, if the message contains a currency amount and the model says it isn't a transaction, a **different** model is asked. Agreement is trusted; disagreement produces a transaction flagged for review. This is the only mechanism that can rescue the silent case.
+
+**Why retries use a different model.** Temperature 0 means the same model returns the same answer, so replaying a hallucination reproduces it exactly. `raw_sms.model` records who answered; retries exclude it. Different model, different mistake — or agreement, which is itself evidence.
+
+**Why reconciliation matters most.** Every other check inspects messages that arrived. Only this one detects a message that *never did*: between two consecutive card SMS the available limit must move by exactly the later transaction's amount — down for a spend, up for a bill payment. Anything else means spending happened that was never recorded, proved by arithmetic against the bank's own numbers rather than by trusting the extractor. Verified in testing: a deliberately removed ₹2,000 transaction was detected purely from the limit figures.
+
+**Rejection is marked, not deleted.** The audit trail matters, and a deleted row would simply be recreated by the next inbox re-scan.
+
+**Red cross means "the parser got it wrong", not "I didn't make this purchase."** Those need opposite responses — one is a database edit, the other is a bank dispute. Conflating them would turn a possible fraudulent charge into a quietly deleted row. The dispute number is in the stored message.
+
+**The real design risk is review fatigue.** A queue that flags everything gets tapped through without reading, which produces *false* confidence — worse than no review. So the triggers are deliberately narrow: models disagreed, amount equals the available limit, or the card isn't registered. Everything else is `auto` and never surfaces. If the queue turns out too noisy or too quiet, the thresholds move; the mechanism doesn't.
+
+**Unreviewed rows do not count.** `list_transactions` defaults to `auto` + `confirmed` only. If flagged rows still counted toward totals, flagging them would achieve nothing.

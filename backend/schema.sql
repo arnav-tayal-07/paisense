@@ -159,6 +159,21 @@ create table transactions (
   -- keeps the history. Null for anything that isn't a card SMS.
   avl_limit       numeric(12, 2),
 
+  -- Whether a human still needs to look at this. The extraction guardrail
+  -- catches an invented amount but not the model picking the wrong REAL
+  -- number, and not a spend it wrongly called "not a transaction".
+  --   auto      - confident, counts immediately
+  --   pending   - flagged, excluded from totals until ticked
+  --   confirmed - user ticked it
+  --   rejected  - user crossed it. Kept, not deleted: the audit trail matters
+  --               and a deleted row would return on the next inbox re-scan.
+  review_status   text not null default 'auto'
+                    check (review_status in ('auto', 'pending', 'confirmed', 'rejected')),
+
+  -- Why it was flagged. Shown on the review card so the user knows what to
+  -- check instead of guessing.
+  review_reason   text,
+
   -- When the ROW appeared, not when the money moved. Separate from txn_time:
   -- scanning Friday's SMS on Sunday gives txn_time = Friday, created_at = Sunday.
   -- Never set by application code — the database owns this one.
@@ -173,6 +188,14 @@ create index transactions_txn_time_idx on transactions (txn_time desc);
 -- and there's no reason to index the NULLs.
 create index transactions_card_id_idx on transactions (card_id)
   where card_id is not null;
+
+-- The review queue is a small slice of a large table.
+create index transactions_review_idx on transactions (txn_time desc)
+  where review_status = 'pending';
+
+-- Every listing and total reads this.
+create index transactions_countable_idx on transactions (txn_time desc)
+  where review_status in ('auto', 'confirmed');
 
 -- Matches cards. Data API is disabled, but RLS on by default is the right posture.
 alter table transactions enable row level security;
@@ -201,14 +224,21 @@ create table raw_sms (
   sms_sent_at     timestamptz not null,
   received_at     timestamptz not null default now(),
 
-  -- pending -> not yet attempted
-  -- parsed  -> produced a transaction
-  -- ignored -> recognised as a non-transaction (OTP, marketing, balance alert)
-  -- failed  -> should have parsed and didn't; this is the early-warning list
+  -- pending      -> not yet attempted
+  -- parsed       -> produced a transaction
+  -- ignored      -> two models agreed it isn't a transaction (OTP, marketing)
+  -- needs_review -> contains an amount but nothing could be read from it
+  -- failed       -> the provider broke; retryable
   parse_status    text not null default 'pending'
-                    check (parse_status in ('pending', 'parsed', 'ignored', 'failed')),
+                    check (parse_status in ('pending', 'parsed', 'ignored',
+                                            'needs_review', 'failed')),
   parse_error     text,
   parsed_at       timestamptz,
+
+  -- Which model produced the last extraction. A retry deliberately avoids
+  -- it: temperature 0 means the same model returns the same answer, so
+  -- re-running it would only ever confirm its own mistake.
+  model           text,
 
   -- ON DELETE SET NULL: deleting a transaction must not delete the evidence
   -- it was derived from.

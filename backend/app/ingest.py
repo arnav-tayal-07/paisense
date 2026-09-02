@@ -32,16 +32,34 @@ where sender = %s and body = %s and sms_sent_at = %s
 
 _UPDATE_RAW = """
 update raw_sms
-set parse_status = %s, parse_error = %s, transaction_id = %s, parsed_at = now()
+set parse_status = %s, parse_error = %s, transaction_id = %s,
+    model = %s, parsed_at = now()
 where id = %s
 returning *
 """
 
+# needs_review is included: a message containing money that nothing could read
+# is exactly as much of an alarm as an outright failure.
 _SELECT_UNPARSED = """
 select * from raw_sms
-where parse_status in ('pending', 'failed')
+where parse_status in ('pending', 'failed', 'needs_review')
 order by received_at desc
 limit %s
+"""
+
+# Deliberately separate from the alarm list. These are messages two models
+# agreed were not transactions — almost always right, but the only place a
+# wrongly-dropped spend could be hiding, so it has to be inspectable.
+_SELECT_IGNORED = """
+select * from raw_sms
+where parse_status = 'ignored'
+order by received_at desc
+limit %s
+"""
+
+_MARK_REVIEW = """
+update transactions set review_status = 'pending', review_reason = %s
+where id = %s and review_status = 'auto'
 """
 
 
@@ -68,14 +86,17 @@ def process_raw(raw: dict) -> dict:
     Runs the LLM call OUTSIDE any open database connection, so a slow or
     hanging provider doesn't hold a connection from the pool.
     """
-    result = extract(raw["sender"], raw["body"])
+    # Avoid the model that answered last time. A retry on the same model at
+    # temperature 0 returns the same answer, so it would only ever confirm
+    # its own mistake.
+    result = extract(raw["sender"], raw["body"], avoid_model=raw.get("model"))
 
     if result.status != "parsed":
-        # 'ignored' (an OTP) and 'failed' (should have worked) both land here,
-        # kept distinct so a genuine failure isn't buried among OTPs.
+        # ignored / needs_review / failed all land here, kept distinct so a
+        # genuine miss isn't buried among correctly-skipped OTPs.
         with get_conn() as conn:
             return conn.execute(
-                _UPDATE_RAW, (result.status, result.error, None, raw["id"])
+                _UPDATE_RAW, (result.status, result.error, None, result.model, raw["id"])
             ).fetchone()
 
     with get_conn() as conn:
@@ -90,8 +111,17 @@ def process_raw(raw: dict) -> dict:
         # every copy of the message points at the transaction it describes.
         row, _created = create_transaction(conn, txn)
 
+        # Money that belongs to a card we can't identify won't appear in any
+        # per-card total, and nothing else would ever mention it.
+        reason = result.review_reason
+        if reason is None and result.card_last4 and txn.card_id is None:
+            reason = f"card ending {result.card_last4} is not registered"
+
+        if reason:
+            conn.execute(_MARK_REVIEW, (reason, row["id"]))
+
         return conn.execute(
-            _UPDATE_RAW, ("parsed", None, row["id"], raw["id"])
+            _UPDATE_RAW, ("parsed", None, row["id"], result.model, raw["id"])
         ).fetchone()
 
 
@@ -105,10 +135,10 @@ def ingest(sms: SmsIn) -> dict:
     raw, is_new = store_raw(sms)
 
     if not is_new:
-        # Already seen. Re-parse only if the last attempt failed — a retry
-        # after fixing a prompt or a card is useful, re-running a successful
-        # parse is a wasted LLM call.
-        if raw["parse_status"] == "failed":
+        # Already seen. Re-parse only if the last attempt didn't produce a
+        # usable result — re-running a successful parse is a wasted LLM call,
+        # and re-running a confident 'ignored' just burns quota on OTPs.
+        if raw["parse_status"] in ("failed", "needs_review", "pending"):
             raw = process_raw(raw)
         return {"raw_sms": raw, "duplicate": True}
 
@@ -116,14 +146,24 @@ def ingest(sms: SmsIn) -> dict:
 
 
 def list_unparsed(limit: int = 50) -> list[dict]:
-    """Messages that need attention: never attempted, or attempted and failed.
+    """Messages needing attention: never attempted, failed, or unreadable.
 
-    This is the early warning that a bank changed its format. 'ignored' rows
-    are deliberately excluded — an OTP that was correctly skipped is not a
-    problem, and including them would bury the real signal.
+    The early warning that a bank changed its format. Confidently-ignored
+    rows are excluded — including OTPs would bury the real signal.
     """
     with get_conn() as conn:
         return conn.execute(_SELECT_UNPARSED, (limit,)).fetchall()
+
+
+def list_ignored(limit: int = 50) -> list[dict]:
+    """Messages judged not to be transactions.
+
+    Almost all of these are correct. It exists because it's the one place a
+    wrongly-dropped spend could hide: an 'ignored' row is in no other list,
+    is never retried, and would otherwise be invisible forever.
+    """
+    with get_conn() as conn:
+        return conn.execute(_SELECT_IGNORED, (limit,)).fetchall()
 
 
 def reprocess_failed(limit: int = 50) -> dict:

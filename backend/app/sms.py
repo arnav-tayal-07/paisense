@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal
 
+import re
+
 from .llm import LLMError, LLMProvider, default_provider
 from .models import TransactionIn
 
@@ -129,16 +131,35 @@ a plausible invention.
 class Extraction:
     """Result of looking at one message.
 
-    Three outcomes, matching raw_sms.parse_status:
-      parsed  - a transaction, ready to insert
-      ignored - definitely not a transaction (an OTP); nothing wrong
-      failed  - should have worked and didn't; this is the alarm
+    Four outcomes, matching raw_sms.parse_status:
+      parsed       - a transaction, ready to insert
+      ignored      - definitely not a transaction (an OTP); nothing wrong
+      needs_review - the message contains money but nothing could be read
+                     from it. Two models declined; a human should look
+      failed       - the provider broke; retryable
     """
 
-    status: Literal["parsed", "ignored", "failed"]
+    status: Literal["parsed", "ignored", "needs_review", "failed"]
     txn: TransactionIn | None = None
     error: str | None = None
     card_last4: str | None = None
+
+    # Which model answered, so a retry can deliberately pick a different one.
+    model: str | None = None
+
+    # Set when the extraction is suspicious enough to want a human tick.
+    # None means confident.
+    review_reason: str | None = None
+
+
+# Every Indian bank SMS writes money as INR or Rs. followed by digits. This is
+# NOT a parser — it answers one question: could this message plausibly contain
+# a transaction? Used only to decide whether to trust a "no" from the model.
+_LOOKS_LIKE_MONEY = re.compile(r"(?:INR|RS\.?)\s*[\d,]+(?:\.\d{1,2})?", re.IGNORECASE)
+
+
+def looks_like_money(message: str) -> bool:
+    return bool(_LOOKS_LIKE_MONEY.search(message))
 
 
 # --------------------------------------------------------------------------
@@ -186,14 +207,19 @@ def extract(
     sender: str,
     body: str,
     provider: LLMProvider | None = None,
+    avoid_model: str | None = None,
 ) -> Extraction:
     """Read one SMS and return what it is.
 
     Never raises. A failure is a returned status, because the caller has
     already stored the raw message and needs to record why it couldn't be
     parsed rather than lose the whole request.
+
+    avoid_model excludes a model that already answered — retrying the same
+    one at temperature 0 reproduces its answer exactly, so a retry only means
+    anything if something changed.
     """
-    provider = provider or default_provider()
+    provider = provider or default_provider(exclude=avoid_model)
 
     try:
         data = provider.extract_json(INSTRUCTIONS, f"From: {sender}\n\n{body}", EXTRACTION_SCHEMA)
@@ -202,13 +228,48 @@ def extract(
         # which is exactly what raw_sms exists to allow.
         return Extraction(status="failed", error=str(e))
 
+    used = getattr(provider, "last_model", None)
+
     if not data.get("is_transaction"):
         reason = data.get("reason", "not a transaction")
-        return Extraction(status="ignored", error=reason)
+
+        # A "no" is only trusted when the message contains no money. If it
+        # does, get a second opinion from a different model before dropping
+        # a possible transaction on the floor — this is the silent failure
+        # that would otherwise never surface, because 'ignored' rows are
+        # excluded from the alarm list on purpose.
+        if looks_like_money(body) and avoid_model is None:
+            second = extract(sender, body, avoid_model=used)
+
+            if second.status == "parsed":
+                # Models disagree. Take the transaction, but flag it — one of
+                # the two is wrong and only a human knows which.
+                second.review_reason = (
+                    f"models disagreed: {used} said '{reason}', "
+                    f"{second.model} read a transaction"
+                )
+                return second
+
+            if second.status == "ignored":
+                # Both declined. Trust it, but record that money was present
+                # and it was double-checked.
+                return Extraction(status="ignored", error=f"{reason} (confirmed by 2 models)", model=used)
+
+            # Second attempt broke rather than answered. The message contains
+            # money and nothing could read it — a human should look.
+            return Extraction(
+                status="needs_review",
+                error=f"contains an amount but no transaction could be read ({reason})",
+                model=used,
+            )
+
+        return Extraction(status="ignored", error=reason, model=used)
 
     amount_raw = data.get("amount")
     if not amount_raw:
-        return Extraction(status="failed", error="model returned a transaction with no amount")
+        return Extraction(
+            status="failed", error="model returned a transaction with no amount", model=used
+        )
 
     # The guardrail. Cheap, and it catches the failure mode that would
     # otherwise be silent: a plausible-looking invented number.
@@ -216,12 +277,13 @@ def extract(
         return Extraction(
             status="failed",
             error=f"amount {amount_raw!r} does not appear in the message",
+            model=used,
         )
 
     try:
         amount = to_amount(amount_raw)
     except InvalidOperation:
-        return Extraction(status="failed", error=f"could not read amount {amount_raw!r}")
+        return Extraction(status="failed", error=f"could not read amount {amount_raw!r}", model=used)
 
     occurred_raw = data.get("occurred_at")
     try:
@@ -255,7 +317,18 @@ def extract(
         dedupe_key=build_dedupe_key(sender, last4, occurred_at, amount) if occurred_at else None,
     )
 
+    # The guardrail above only catches an INVENTED amount. It cannot catch the
+    # model picking the wrong REAL number, and every IDFC message contains two
+    # candidates — the spend and the available limit. If those come back equal,
+    # the wrong one was chosen: a purchase for exactly your remaining limit,
+    # to the paisa, does not happen.
+    review_reason = None
+    if avl_limit is not None and amount == avl_limit:
+        review_reason = "amount matches the available limit exactly - likely the wrong number"
+
     # card_last4 is set on the transaction above, and returned separately as
     # well: card_id needs a database lookup (app.cards.resolve_card_id) that
     # has no business inside a parsing function.
-    return Extraction(status="parsed", txn=txn, card_last4=last4)
+    return Extraction(
+        status="parsed", txn=txn, card_last4=last4, model=used, review_reason=review_reason
+    )

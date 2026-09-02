@@ -80,6 +80,7 @@ def list_transactions(
     card_id: int | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    countable_only: bool = True,
 ) -> list[dict]:
     """Transactions matching the given filters, newest first.
 
@@ -110,6 +111,12 @@ def list_transactions(
     conditions = [sql for sql, value in filters if value is not None]
     params = [value for _, value in filters if value is not None]
 
+    # Default excludes anything awaiting a tick or already crossed out. If
+    # unreviewed rows counted toward totals, flagging them would achieve
+    # nothing — the wrong number would still be in your monthly spend.
+    if countable_only:
+        conditions.append("review_status in ('auto', 'confirmed')")
+
     where = f"where {' and '.join(conditions)}" if conditions else ""
 
     # txn_time desc, not id — id is insertion order, so an SMS scanned on
@@ -123,6 +130,92 @@ def list_transactions(
     params.append(limit)
 
     return conn.execute(query, params).fetchall()
+
+
+_SELECT_REVIEW = """
+select t.*, r.body as source_message, r.sender as source_sender
+from transactions t
+left join raw_sms r on r.transaction_id = t.id
+where t.review_status = 'pending'
+order by t.txn_time desc
+limit %s
+"""
+
+# `and review_status = 'pending'` makes this idempotent: ticking twice is a
+# no-op rather than resurrecting something already rejected.
+_SET_REVIEW = """
+update transactions set review_status = %s
+where id = %s and review_status = 'pending'
+returning *
+"""
+
+
+def list_for_review(conn: Connection, limit: int = 50) -> list[dict]:
+    """Transactions awaiting a human tick, with the message they came from.
+
+    The original SMS travels with the row on purpose — the whole point of the
+    card is comparing what was extracted against what the bank actually said.
+    """
+    return conn.execute(_SELECT_REVIEW, (limit,)).fetchall()
+
+
+def set_review(conn: Connection, txn_id: int, status: str) -> dict | None:
+    """Confirm or reject. None if the row isn't pending review."""
+    return conn.execute(_SET_REVIEW, (status, txn_id)).fetchone()
+
+
+_RECONCILE = """
+select id, txn_time, type, amount, avl_limit, merchant, card_last4
+from transactions
+where card_id = %s and avl_limit is not null
+  and review_status in ('auto', 'confirmed')
+order by txn_time
+"""
+
+
+def reconcile_card(conn: Connection, card_id: int) -> dict:
+    """Check recorded spending against the bank's own available-limit figures.
+
+    Every card SMS reports the limit remaining afterwards. Between two
+    consecutive messages the limit should move by exactly the amount of the
+    later transaction — down for a spend, up for a bill payment. If it moved
+    further than that, a transaction happened that was never recorded, and
+    the arithmetic says so without needing to read any message.
+
+    This is the only check that can catch a MISSING transaction. Everything
+    else can only inspect messages that did arrive.
+    """
+    rows = conn.execute(_RECONCILE, (card_id,)).fetchall()
+    gaps = []
+
+    for prev, curr in zip(rows, rows[1:]):
+        observed = prev["avl_limit"] - curr["avl_limit"]
+        # A spend reduces the available limit; paying the bill restores it.
+        expected = curr["amount"] if curr["type"] != "card_payment" else -curr["amount"]
+        unexplained = observed - expected
+
+        if unexplained != 0:
+            gaps.append(
+                {
+                    "between": [prev["id"], curr["id"]],
+                    "from": prev["txn_time"].isoformat(),
+                    "to": curr["txn_time"].isoformat(),
+                    "unexplained_amount": str(unexplained),
+                    "note": (
+                        "limit fell further than recorded spending - a transaction is missing"
+                        if unexplained > 0
+                        else "limit fell less than recorded spending - an amount may be wrong"
+                    ),
+                }
+            )
+
+    return {
+        "card_id": card_id,
+        "checked": len(rows),
+        "gaps": gaps,
+        # Fewer than two datapoints means nothing can be compared yet.
+        "conclusive": len(rows) >= 2,
+    }
 
 
 _SELECT_BY_ID = "select * from transactions where id = %s"

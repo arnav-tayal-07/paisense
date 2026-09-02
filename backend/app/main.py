@@ -13,13 +13,16 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from psycopg.errors import ForeignKeyViolation
 
 from .db import get_conn
-from .ingest import ingest, list_unparsed, reprocess_failed
+from .ingest import ingest, list_ignored, list_unparsed, reprocess_failed
 from .models import SmsIn, TransactionIn
 from .transactions import (
     create_transaction,
     delete_transaction,
     get_transaction,
+    list_for_review,
     list_transactions,
+    reconcile_card,
+    set_review,
 )
 
 app = FastAPI(title="PaiSense API")
@@ -97,6 +100,71 @@ def post_reprocess_sms(limit: int = Query(default=50, ge=1, le=200)):
     return reprocess_failed(limit)
 
 
+@app.get("/sms/ignored")
+def get_ignored_sms(limit: int = Query(default=50, ge=1, le=200)):
+    """Messages judged not to be transactions.
+
+    Kept out of /sms/unparsed so OTPs don't bury real failures — but exposed
+    here because this is the one place a wrongly-dropped spend could hide.
+    An ignored row is in no other list and is never retried.
+    """
+    return list_ignored(limit)
+
+
+@app.get("/transactions/review")
+def get_review_queue(limit: int = Query(default=50, ge=1, le=200)):
+    """Transactions awaiting a tick, each with the SMS it came from.
+
+    Flagged when the extraction was suspicious: two models disagreed, the
+    amount equals the available limit exactly, or the card isn't registered.
+    Everything else lands as 'auto' and never appears here — a queue you
+    scroll past without reading is worse than no queue.
+    """
+    with get_conn() as conn:
+        return list_for_review(conn, limit)
+
+
+@app.post("/transactions/{txn_id}/confirm")
+def post_confirm_transaction(txn_id: int):
+    """Green tick. The transaction starts counting toward totals."""
+    with get_conn() as conn:
+        row = set_review(conn, txn_id, "confirmed")
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No transaction {txn_id} awaiting review")
+    return row
+
+
+@app.post("/transactions/{txn_id}/reject")
+def post_reject_transaction(txn_id: int):
+    """Red cross: the extraction was wrong. Excluded from every total.
+
+    Marked, not deleted — the audit trail matters, and a deleted row would
+    simply be recreated by the next inbox re-scan.
+
+    This means "the parser got it wrong", NOT "I didn't make this purchase".
+    A charge you don't recognise is a bank dispute, not a database edit; the
+    dispute number is in the stored message.
+    """
+    with get_conn() as conn:
+        row = set_review(conn, txn_id, "rejected")
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No transaction {txn_id} awaiting review")
+    return row
+
+
+@app.get("/cards/{card_id}/reconcile")
+def get_card_reconciliation(card_id: int):
+    """Check recorded spending against the bank's own available-limit figures.
+
+    Between two consecutive card SMS the limit should move by exactly the
+    later transaction's amount. If it moved further, a transaction happened
+    that was never recorded. This is the only check that can detect a
+    MISSING message — everything else can only inspect ones that arrived.
+    """
+    with get_conn() as conn:
+        return reconcile_card(conn, card_id)
+
+
 @app.get("/transactions")
 def get_transactions(
     # A plain argument with a default becomes a query parameter: ?limit=20.
@@ -113,6 +181,10 @@ def get_transactions(
     card_id: int | None = Query(default=None, description="Spend on one card"),
     start: datetime | None = Query(default=None, description="Inclusive lower bound on txn_time"),
     end: datetime | None = Query(default=None, description="Exclusive upper bound on txn_time"),
+    include_unreviewed: bool = Query(
+        default=False,
+        description="Include rows awaiting review or rejected. Off by default so totals stay honest.",
+    ),
 ):
     """Transactions matching the filters, newest first by txn_time.
 
@@ -130,6 +202,7 @@ def get_transactions(
             card_id=card_id,
             start=start,
             end=end,
+            countable_only=not include_unreviewed,
         )
 
 

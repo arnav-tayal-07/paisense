@@ -107,6 +107,9 @@ class GeminiProvider:
         # Remembers which model last worked, so a healthy fallback isn't
         # re-tested against an exhausted primary on every single message.
         self._preferred = 0
+        # Which model produced the most recent answer. Stored so callers can
+        # record provenance and deliberately avoid it on a retry.
+        self.last_model: str | None = None
         if not self.api_key:
             raise LLMError(f"GEMINI_API_KEY not set. Expected it in {ENV_PATH}")
 
@@ -125,6 +128,7 @@ class GeminiProvider:
                 continue
 
             self._preferred = self.models.index(model)
+            self.last_model = model
             return result
 
         # ASCII only: this string is stored in raw_sms.parse_error and read
@@ -196,6 +200,17 @@ class GeminiProvider:
             raise LLMError(f"unexpected Gemini response shape: {e}") from e
 
 
-def default_provider() -> LLMProvider:
-    """The provider the app uses. One line to change for the whole codebase."""
-    return GeminiProvider()
+def default_provider(exclude: str | None = None) -> LLMProvider:
+    """The provider the app uses. One line to change for the whole codebase.
+
+    exclude drops one model from the chain, so a second opinion is genuinely
+    a different opinion. At temperature 0 the same model returns the same
+    answer, which makes retrying it pointless.
+    """
+    models = _model_chain()
+    if exclude:
+        remaining = [m for m in models if m != exclude]
+        # Never hand back an empty chain — one model that already answered
+        # beats no model at all.
+        models = remaining or models
+    return GeminiProvider(models=models)
