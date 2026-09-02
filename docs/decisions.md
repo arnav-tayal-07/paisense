@@ -345,3 +345,24 @@ The model is *also* asked for the reference — not to use, but so a disagreemen
 **Known risk, not mitigated:** a generated regex could in principle backtrack catastrophically. Bank SMS are short, which bounds it, and validation runs the pattern before it is ever trusted — but nothing detects a pathological pattern directly.
 
 **This is what makes "we use both regex and LLM" a design rather than a checklist item:** the model writes the parser, the parser reads the messages, and the model is the fallback when its own parser fails.
+
+## 030 — One bank, several message families, kept apart
+
+**Context:** Arnav pointed out that the same bank sends both credit card messages and bank account UPI messages, and that they must be stored and used separately.
+
+**Already handled:** `sms_patterns` holds several patterns per sender, each with its own regex and `txn_type`, and generation groups the samples by format itself. Verified: one IDFC sender produced three distinct patterns — card purchase, card standing instruction, and UPI debit.
+
+**What was missing, and it mattered:** each pattern was only ever validated against *its own* samples. Nothing stopped a loose card regex from also matching a UPI message and filing that transaction against the wrong account — the silent wrong-field failure from ADR 029, but across formats instead of within one.
+
+**Decision, two parts:**
+
+1. **Negative validation.** A pattern must also *fail* to match every sample belonging to a different format in the batch. The notes now read like `"validated, and rejects 5 messages of other formats"`. A pattern that is too greedy never goes active.
+2. **`account_kind` on each pattern.** The model records whether a format's digits identify a credit card or a bank account, and `resolve_account_id` uses it to narrow the search. A card ending 3577 and a savings account ending 3577 at the same bank would otherwise be indistinguishable.
+
+**Limitation, recorded honestly:** negative validation only compares against formats present in the same generation batch. A format the bank hasn't sent recently is not represented and therefore not checked against.
+
+**Dependency discovered while testing:** pattern learning samples only transactions with `review_status` of `auto` or `confirmed`. The first attempt silently ignored three UPI messages because their account was unregistered, so they were flagged `pending`. That is correct — patterns must not be learned from unverified extractions — but it means **accounts should be registered before pattern generation**, and it is not obvious from the outside.
+
+**Follow-up not built:** registering an account does not retroactively link transactions that failed to resolve earlier. They sit flagged with `"account ending 8890 is not registered"` until confirmed by hand. A re-resolve pass over unlinked transactions would fix that.
+
+**Verified end to end:** with both patterns active, a new card message parsed via the card pattern into the credit card account, and a new UPI message via the UPI pattern into the savings account — both in about a second, with no model call.

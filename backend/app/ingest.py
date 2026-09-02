@@ -164,7 +164,9 @@ def _record_pattern_hit(raw: dict, hit) -> dict:
     )
 
     with get_conn() as conn:
-        txn.account_id = resolve_account_id(conn, raw["sender"], f["account_last4"])
+        txn.account_id = resolve_account_id(
+            conn, raw["sender"], f["account_last4"], f.get("account_kind")
+        )
         row, _created = create_transaction(conn, txn)
 
         if f["account_last4"] and txn.account_id is None:

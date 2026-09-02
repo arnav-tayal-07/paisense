@@ -34,7 +34,9 @@ where n.last4 = %s
 """
 
 
-def resolve_account_id(conn: Connection, sender: str, last4: str | None) -> int | None:
+def resolve_account_id(
+    conn: Connection, sender: str, last4: str | None, kind: str | None = None
+) -> int | None:
     """Find the account a card number belongs to. None if unsure.
 
     Three outcomes, and the third is the one that matters:
@@ -46,13 +48,24 @@ def resolve_account_id(conn: Connection, sender: str, last4: str | None) -> int 
     if not last4:
         return None
 
-    rows = conn.execute(_BY_ISSUER_AND_LAST4, (last4, sender or "")).fetchall()
+    # A bank can issue a credit card and a savings account whose digits
+    # collide. When the pattern knows which kind of message it read, that
+    # narrows the search and removes the ambiguity entirely.
+    def _narrow(rows):
+        if kind is None or len(rows) <= 1:
+            return rows
+        ids = tuple(r["id"] for r in rows)
+        return conn.execute(
+            "select id from accounts where id = any(%s) and kind = %s", (list(ids), kind)
+        ).fetchall()
+
+    rows = _narrow(conn.execute(_BY_ISSUER_AND_LAST4, (last4, sender or "")).fetchall())
     if len(rows) == 1:
         return rows[0]["id"]
 
     # Either no card has an issuer_code set yet, or the sender didn't match
     # one. Fall back to the digits alone — but only if they're unambiguous.
-    rows = conn.execute(_BY_LAST4, (last4,)).fetchall()
+    rows = _narrow(conn.execute(_BY_LAST4, (last4,)).fetchall())
     if len(rows) == 1:
         return rows[0]["id"]
 

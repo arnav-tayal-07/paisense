@@ -315,6 +315,12 @@ create table sms_patterns (
   -- Fixed per format: one message shape always means one direction.
   txn_type      text not null check (txn_type in ('expense', 'income', 'card_payment')),
 
+  -- Whether this format's digits identify a credit card or a bank account.
+  -- One bank sends both, sometimes from the same DLT header, and a card
+  -- ending 3577 could collide with a savings account ending 3577. Knowing
+  -- the kind narrows the lookup and removes the ambiguity.
+  account_kind  text check (account_kind in ('credit_card', 'bank_account')),
+
   -- candidate -> failed validation, or validated on only ONE sample. Not used.
   -- active    -> reproduced the model's own answer on 2+ samples. Trusted.
   -- retired   -> superseded, or stopped compiling.

@@ -67,13 +67,19 @@ GENERATION_SCHEMA = {
                         "nullable": True,
                     },
                     "txn_type": {"type": "string", "enum": ["expense", "income", "card_payment"]},
+                    "account_kind": {
+                        "type": "string",
+                        "enum": ["credit_card", "bank_account"],
+                        "description": "What the digits in this format refer to. Null if unclear.",
+                        "nullable": True,
+                    },
                     "sample_indices": {
                         "type": "array",
                         "items": {"type": "integer"},
                         "description": "0-based indices of the samples this pattern covers.",
                     },
                 },
-                "required": ["name", "pattern", "date_format", "txn_type", "sample_indices"],
+                "required": ["name", "pattern", "date_format", "txn_type", "account_kind", "sample_indices"],
             },
         }
     },
@@ -107,6 +113,7 @@ neighbouring fields and capture the wrong value.
 - date_format must parse the 'occurred' group with datetime.strptime. If a \
 format carries no date, omit the occurred group and set date_format null.
 - txn_type describes what that message FORMAT always means, not one instance.
+- account_kind says whether the digits in that format identify a CREDIT CARD ("your Credit Card ending XX1234") or a BANK ACCOUNT ("your a/c XX1234", "Dr. from A/C XXXXXX1234"). One bank sends both. Null only if genuinely unclear.
 - Every sample index must appear in exactly one group.
 """
 
@@ -200,6 +207,7 @@ def _decode(m: re.Match, row: dict) -> dict | None:
 
     return {
         "type": row["txn_type"],
+        "account_kind": row.get("account_kind"),
         "amount": amount,
         "merchant": groups.get("merchant"),
         "counterparty": groups.get("counterparty"),
@@ -283,6 +291,14 @@ def generate(
 
         ok, note = validate(group, mine)
 
+        # A pattern must not match the OTHER formats from this bank. Checking
+        # only its own samples would let a loose card regex quietly swallow a
+        # UPI message and file it against the wrong account - the silent
+        # wrong-field failure again, across formats instead of within one.
+        if ok:
+            others = [s for j, s in enumerate(samples) if j not in indices]
+            ok, note = reject_others(group, others) if others else (ok, note)
+
         # One sample can be reproduced by a pattern that simply hard-codes it.
         # Passing on a single example is not evidence, so it stays a candidate
         # until a second message of that format arrives.
@@ -293,8 +309,9 @@ def generate(
         row = conn.execute(
             """
             insert into sms_patterns
-              (sender_code, name, pattern, date_format, txn_type, status, sample_count, note)
-            values (%s, %s, %s, %s, %s, %s, %s, %s)
+              (sender_code, name, pattern, date_format, txn_type, account_kind,
+               status, sample_count, note)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             returning *
             """,
             (
@@ -303,6 +320,7 @@ def generate(
                 group["pattern"],
                 group.get("date_format"),
                 group["txn_type"],
+                group.get("account_kind"),
                 status,
                 len(mine),
                 note,
@@ -314,6 +332,7 @@ def generate(
                 "pattern_id": row["id"],
                 "name": row["name"],
                 "status": row["status"],
+                "account_kind": row["account_kind"],
                 "samples": len(mine),
                 "note": note,
             }
@@ -380,6 +399,28 @@ def validate(spec: dict, samples: list[dict]) -> tuple[bool, str]:
     return True, f"validated against {len(samples)} samples"
 
 
+def reject_others(spec: dict, others: list[dict]) -> tuple[bool, str]:
+    """A pattern must NOT match messages belonging to another format.
+
+    Positive validation proves a pattern reads its own format correctly. It
+    says nothing about whether it also matches a different one — and a card
+    pattern that happens to match a UPI message would file that transaction
+    against the wrong account with nothing to notice.
+
+    Limitation worth knowing: this only compares against the other formats
+    present in the same generation batch. A format the bank hasn't sent
+    recently isn't represented, so it isn't checked.
+    """
+    rx = re.compile(spec["pattern"], re.IGNORECASE | re.DOTALL)
+
+    for i, s in enumerate(others):
+        m = rx.search(s["body"])
+        if m and _decode(m, {"txn_type": spec["txn_type"], "date_format": spec.get("date_format")}):
+            return False, f"also matches a different format (sample {i}) - too loose"
+
+    return True, f"validated, and rejects {len(others)} messages of other formats"
+
+
 def stats(conn: Connection) -> list[dict]:
     """Every pattern with its hit and miss counts.
 
@@ -387,7 +428,7 @@ def stats(conn: Connection) -> list[dict]:
     """
     return conn.execute(
         """
-        select id, sender_code, name, status, sample_count, hits, misses,
+        select id, sender_code, name, status, account_kind, sample_count, hits, misses,
                case when hits + misses = 0 then null
                     else round(misses::numeric / (hits + misses), 3)
                end as miss_rate,
