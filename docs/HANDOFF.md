@@ -15,7 +15,7 @@
 
 | Item | Status |
 |---|---|
-| Architecture + all decisions | ✅ [decisions.md](decisions.md), ADR 001–023 |
+| Architecture + all decisions | ✅ [decisions.md](decisions.md), ADR 001–025 |
 | GitHub repo | ✅ https://github.com/arnav-tayal-07/paisense |
 | **Live API** | ✅ **https://paisense.onrender.com** — Render free tier, Singapore. Auto-deploys on push to `main` |
 | Supabase project | ✅ `paisense`, Mumbai, Data API disabled, RLS on every table |
@@ -25,7 +25,7 @@
 | Transactions API | ✅ full CRUD with filtering |
 | SMS ingestion | ✅ LLM extraction, raw audit trail, replay on failure |
 | Real data in DB | ✅ 1 card account (IDFC, 2 numbers), 4 transactions, 3 raw_sms |
-| Card management routes | ❌ data functions exist, no endpoints — **next step** |
+| Card + review routes | ✅ full CRUD, review queue, reconciliation (ADR 024-025) |
 | Keepalive workflow | ⚠️ committed, needs `PAISENSE_API_URL` secret set in GitHub |
 | UPI messages | ⚠️ **untested, and `upi_ref` is never extracted** — see below |
 | Expo app (Phase 6) | ❌ not started — decided to build BEFORE the agent |
@@ -63,6 +63,14 @@ Run it from `backend\`: `.\.venv\Scripts\uvicorn.exe app.main:app --reload`, the
 | `POST /sms` | store raw, extract, link card, insert. **Always 200** - an unparseable SMS is a recorded outcome, not a failed request |
 | `GET /sms/unparsed` | `pending` + `failed` messages. The format-change alarm |
 | `POST /sms/reprocess` | replay failures. Safe because `dedupe_key` makes re-insert a no-op |
+| `GET /sms/ignored` | messages judged not to be transactions — where a wrongly-dropped spend would hide |
+| `PATCH /transactions/{id}` | partial edit. Does NOT change review_status |
+| `GET /transactions/review` | the tick/cross queue, each row with its source SMS |
+| `POST /transactions/{id}/confirm` \| `/reject` | green tick / red cross |
+| `POST` `GET` `PATCH /cards` | account CRUD — the app's edit button |
+| `POST /cards/{id}/numbers` | attach a physical card (Visa + RuPay on one account) |
+| `PATCH /cards/{id}/numbers/{last4}` | retire a reissued card without losing history |
+| `GET /cards/{id}/reconcile` | check spending against the bank's own limit figures |
 
 Phase 4's agent tools map straight onto the GET filters: `monthly_total` is `start`/`end`, `search` is `merchant`.
 
@@ -108,14 +116,20 @@ Handles with no bank-specific code: `27-08-26`, `29/08/2026` and `07 AUG 2026`; 
 
 ## The exact next step
 
-**Card management routes.** [cards.py](../backend/app/cards.py) has `create_card`, `add_card_number`, `list_cards`, `resolve_card_id` - but no endpoints, so cards can only be created from a Python shell. Needed for the app's edit button:
+**The Expo app.** Decided deliberately to build this BEFORE the agent — the agent is purely additive and nothing depends on it, whereas the SMS pipeline has only ever been tested by pasting messages by hand.
 
-| `POST /cards` | create an account |
-| `GET /cards` | list with numbers nested |
-| `PATCH /cards/{id}` | edit statement/due day when the bank changes it |
-| `POST /cards/{id}/numbers` | add a replacement card |
+Sequence agreed:
+1. Screens against the live API — transaction list, cards, the review card with tick/cross
+2. SMS reading, which needs native modules and a development build
+3. (Deploy already done)
 
-Then **Phase 4 - the agent.** `llm.py` already provides the provider interface it needs.
+**Skip Expo Go — go straight to a development build.** `expo-sms` cannot read messages; reading needs `react-native-get-sms-android` (stored inbox, what the re-scan design needs) or `@maniac-tech/react-native-expo-read-sms` (incoming only). Neither is in Expo Go, so a dev build via EAS is required anyway. Arnav asked to skip Expo Go entirely, which is the right call.
+
+**Two constraints, both real:**
+- **Never publishable on the Play Store.** Google restricts `READ_SMS` to apps whose core function is SMS handling. Sideloaded APKs are unaffected, so nothing is blocked — but this sharpens ADR 001's "needs SMS permission" into "and therefore never on Play".
+- The Expo read-SMS library documents testing only to SDK 50 and has open 2026 bug reports. Lightly maintained, and it's on the core capture path.
+
+**The app needs its own outbox.** `raw_sms` guarantees nothing is lost *once the server has it*. Between phone and server there is no such guarantee, and Render's free tier sleeps — so a forwarded message can hit a cold start and time out. The app must hold each message locally and only mark it sent on acknowledgement. Same reasoning as ADR 018, one layer up.
 
 ## Deploy notes
 
