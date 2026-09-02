@@ -3,18 +3,64 @@
 -- Rule: nothing exists in the database that isn't written down here.
 -- Order matters: a table must be created before anything that references it.
 
--- Credit cards. Referenced by transactions.card_id, so it goes first.
+-- A credit ACCOUNT: one credit limit, one statement date, one due date.
+-- Not one piece of plastic — see card_numbers below. Referenced by
+-- transactions.card_id, so it goes first.
 create table cards (
   id             bigint generated always as identity primary key,
   name           text not null,
-  -- 4-6 digits, not char(4): Amex shows five (***71003). text rather than
-  -- char also avoids blank-padding surprises in comparisons.
-  last4          text check (last4 ~ '^[0-9]{4,6}$'),
+
+  -- DLT sender segment for the issuer: AXISBK, IDFCFB, AMEXIN, HDFCBK...
+  -- Disambiguates lookups. Two banks can legitimately issue cards ending in
+  -- the same four digits, and the sender header is the only part of an SMS
+  -- that reliably identifies the bank — Amex never names itself in the body.
+  issuer_code    text,
+
+  -- Values 29-31 must be clamped to the last day of shorter months when
+  -- computing due dates. February exists.
   statement_day  int not null check (statement_day between 1 and 31),
   due_days_after int not null default 20,
   credit_limit   numeric(12, 2),
+
+  -- A closed account keeps its history but drops out of due-date reminders
+  -- and "which cards do I have" lists.
+  is_active      boolean not null default true,
+
   created_at     timestamptz not null default now()
 );
+
+-- The physical cards on an account. One IDFC account can carry a Visa and a
+-- RuPay with different last4 digits sharing a single limit — standard in
+-- India, because RuPay is what links to UPI. Two rows in `cards` would store
+-- that one limit twice and duplicate the statement and due dates.
+create table card_numbers (
+  id          bigint generated always as identity primary key,
+
+  -- Deleting an account removes its cards; a number is meaningless without
+  -- the account. Transactions are unaffected — they reference cards(id), and
+  -- that FK still blocks deleting an account that has spending history.
+  card_id     bigint not null references cards(id) on delete cascade,
+
+  -- 4 digits normally, 5 for Amex.
+  last4       text not null check (last4 ~ '^[0-9]{4,6}$'),
+
+  network     text check (network in ('visa', 'rupay', 'mastercard', 'amex', 'diners', 'other')),
+
+  -- Reissued cards keep their row so historical SMS still resolve, but stop
+  -- being offered as current.
+  is_active   boolean not null default true,
+
+  created_at  timestamptz not null default now(),
+
+  -- Not globally unique on last4: two banks issuing cards ending 3577 is
+  -- legitimate. The resolver disambiguates by issuer_code instead.
+  constraint card_numbers_unique_per_card unique (card_id, last4)
+);
+
+-- Every SMS triggers a lookup by last4. Hot path.
+create index card_numbers_last4_idx on card_numbers (last4);
+
+alter table card_numbers enable row level security;
 
 -- RLS on, no policies. Deny-all for the anon/authenticated roles; the backend
 -- connects as the table owner via the session pooler, and owners bypass RLS.
@@ -71,10 +117,17 @@ create table transactions (
   -- Tighten to a check once the parser has seen real messages.
   payment_method  text,
 
-  -- Nullable: only card spends point at a card. No ON DELETE clause, so the
-  -- default (no action) blocks deleting a card that still has history —
-  -- which is what you want; spending records shouldn't vanish with the card.
+  -- The ACCOUNT this belongs to. Nullable: only card spends point at one.
+  -- No ON DELETE clause, so the default blocks deleting an account that
+  -- still has history — spending records shouldn't vanish with the card.
   card_id         bigint references cards(id),
+
+  -- WHICH physical card, as the message reported it. Text rather than a
+  -- foreign key on purpose: a snapshot of what the SMS actually said, in
+  -- the same spirit as raw_sms. Survives a card_numbers row being edited or
+  -- deleted, needs no join, and can't drift from the evidence. Lets you
+  -- separate RuPay (UPI) spending from Visa (swipe) on one account.
+  card_last4      text,
 
   -- How the row got here. Not null with a default because every row has a
   -- provenance, and 'manual' is the honest answer when nothing says otherwise.

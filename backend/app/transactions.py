@@ -18,10 +18,12 @@ from .models import TransactionIn
 _INSERT = """
 insert into transactions
   (type, amount, merchant, category, txn_time,
-   upi_ref, dedupe_key, payment_method, card_id, source, note, avl_limit)
+   upi_ref, dedupe_key, payment_method, card_id, card_last4,
+   source, note, avl_limit)
 values
   (%s, %s, %s, %s, coalesce(%s, now()),
-   %s, %s, %s, %s, %s, %s, %s)
+   %s, %s, %s, %s, %s,
+   %s, %s, %s)
 on conflict (dedupe_key) do nothing
 returning *
 """
@@ -48,6 +50,7 @@ def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool
         txn.dedupe_key,
         txn.payment_method,
         txn.card_id,
+        txn.card_last4,
         txn.source,
         txn.note,
         txn.avl_limit,

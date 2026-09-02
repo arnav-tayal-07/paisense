@@ -250,11 +250,12 @@ def extract(
         merchant=data.get("merchant") or None,
         txn_time=occurred_at,
         avl_limit=avl_limit,
+        card_last4=last4,
         source="sms",
         dedupe_key=build_dedupe_key(sender, last4, occurred_at, amount) if occurred_at else None,
     )
 
-    # card_last4 travels alongside rather than inside TransactionIn: the
-    # transactions table stores card_id, and resolving last4 -> card_id needs
-    # a database lookup that doesn't belong in a parsing function.
+    # card_last4 is set on the transaction above, and returned separately as
+    # well: card_id needs a database lookup (app.cards.resolve_card_id) that
+    # has no business inside a parsing function.
     return Extraction(status="parsed", txn=txn, card_last4=last4)

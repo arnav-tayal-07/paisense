@@ -151,4 +151,24 @@ Supporting choices in the same table:
 **What we gave up:** The messages cannot be un-sent, and training influence is irreversible. Revisit if the app is ever used by anyone else, where the data would no longer be his to trade away.
 **Reversibility:** Keep the provider behind one interface (ADR 009's original point) so switching to a no-training tier is a one-file change. `raw_sms` (ADR 018) stores every message, so re-extracting under a different provider later is a replay, not a re-collection.
 
+**Correction (same day):** this ADR originally justified the trade-off as "the data is his own." The first two sample messages were in fact borrowed from someone else as format references, and were committed and sent to Gemini only with altered digits and limits. From the IDFC messages onward the data is genuinely his, so the reasoning holds going forward.
+
 **This also settles hybrid vs LLM-only: LLM-only.** The strongest argument for the hybrid was privacy — regexes would keep known banks local so only unknown formats left the server. With free tier accepted, that argument is gone, leaving only latency and cost, and neither matters at a handful of messages a day. Regexes can be added later purely as an optimisation for a high-volume bank. Nothing needs them now, and skipping them is what Arnav wanted from the start.
+
+## 020 — A credit account and a piece of plastic are different things
+
+**Context:** One IDFC FIRST account turned out to carry two physical cards — a Visa and a RuPay, different last4 digits, one shared credit limit, one statement, one due date. `cards` assumed one row = one card = one limit.
+**Decision:** `cards` becomes the account. A new `card_numbers` table holds the physical cards (`card_id`, `last4`, `network`, `is_active`). `last4` is removed from `cards` entirely.
+**Why:** Two rows in `cards` would store one credit limit twice, duplicate the statement and due dates, and turn "spend on my IDFC card" into a sum across rows that something will eventually forget to do. The `avl_limit` from an SMS would also look like it belonged to one card when it is in fact the shared figure. RuPay-plus-Visa on one account is standard in India — RuPay is what links to UPI — so this is the normal case, not an edge case.
+**Trade-off:** A join to resolve a card, and two inserts to register one card. Both trivial at this size.
+
+**Edge cases this now handles:**
+
+- *Card reissued after expiry* — add a row, mark the old one inactive. History survives because transactions reference the account, not the number.
+- *Account closed* — `cards.is_active = false` drops it from reminders and pickers while keeping every transaction.
+- *Two banks issuing cards ending in the same digits* — `last4` is deliberately **not** globally unique. `cards.issuer_code` holds the DLT sender segment (`IDFCFB`, `AXISBK`) and the resolver matches on issuer first.
+- *Ambiguity* — if `last4` matches several accounts and the issuer can't separate them, `resolve_card_id` returns `None` rather than guessing. A wrong link silently corrupts a card's totals; an unlinked transaction is visible and fixable by replaying from `raw_sms`.
+- *Statement day 29–31* — recorded as a column comment: due-date computation must clamp to the last day of shorter months. February exists.
+- *Re-running setup* — `add_card_number` uses `ON CONFLICT DO NOTHING`, so adding the same number twice is a no-op rather than an error.
+
+**Also added: `transactions.card_last4`.** Text, not a foreign key — a snapshot of what the message actually said, in the same spirit as `raw_sms`. It survives a `card_numbers` row being edited or deleted, needs no join to read, and can't drift from the evidence. `card_id` still carries the real relationship for aggregation. Together they let you split RuPay (UPI) spend from Visa (swipe) on a single account.

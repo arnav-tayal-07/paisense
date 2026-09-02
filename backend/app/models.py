@@ -31,8 +31,16 @@ class TransactionIn(BaseModel):
     merchant: Optional[str] = None
     category: Optional[str] = None
     payment_method: Optional[str] = None
-    card_id: Optional[int] = None
     note: Optional[str] = None
+
+    # The account. Resolved from card_last4 by app.cards.resolve_card_id —
+    # callers usually supply card_last4 and let the lookup fill this in.
+    card_id: Optional[int] = None
+
+    # Which physical card, as the message reported it. One account can carry
+    # a Visa and a RuPay with different digits sharing a limit, so this is
+    # how RuPay (UPI) spend is told apart from Visa (swipe).
+    card_last4: Optional[str] = None
 
     # A real bank reference when the message carries one. Data only — it no
     # longer drives dedupe, and is no longer unique. See ADR 017.
