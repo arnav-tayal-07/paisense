@@ -366,3 +366,34 @@ The model is *also* asked for the reference — not to use, but so a disagreemen
 **Follow-up not built:** registering an account does not retroactively link transactions that failed to resolve earlier. They sit flagged with `"account ending 8890 is not registered"` until confirmed by hand. A re-resolve pass over unlinked transactions would fix that.
 
 **Verified end to end:** with both patterns active, a new card message parsed via the card pattern into the credit card account, and a new UPI message via the UPI pattern into the savings account — both in about a second, with no model call.
+
+## 031 — Bulk import: separate storing from extracting, and let extraction teach
+
+**Context:** First install should offer to import SMS history — Arnav's onboarding idea. `POST /sms` handles one message and extracts immediately, so a few hundred messages would mean a few hundred model calls and a dead quota partway through.
+
+**Decision:** Split it in two. `POST /sms/batch` stores many messages as `pending` with no extraction — instant and free. `POST /sms/import/run` then works the queue with a **budget** of model calls, alternating between learning and sweeping.
+
+**The loop, and why it's a loop:** a handful of messages go through the model; those become ground truth for generating patterns (ADR 029); the new patterns then clear every other message in that format for free; whatever is left is a format not yet covered, so seed again. Each model call buys a pattern worth dozens of messages.
+
+**Measured on 64 messages across 3 banks and 4 formats:**
+
+| | messages | model calls |
+|---|---|---|
+| first import (learning) | 64 | 32 |
+| second import (patterns exist) | 56 | **0** |
+
+The fixed cost is paid once. At 400 messages the same ~32 calls would clear the lot.
+
+**Budget, not batch size.** The caller says how many model calls to spend, not how many messages to process. Running out of quota is then a *pause*, not a failure — whatever is still `pending` is picked up on the next call, which is exactly what `raw_sms` was built for (ADR 018).
+
+**Three bugs found by testing, all worth recording:**
+
+1. **Duplicate patterns.** `generate()` inserted without retiring the previous set, so every round appended another near-identical copy — one run left **eleven** active patterns for a single format. It now replaces the previous generation wholesale, but only if the new set produced something active, so a bad generation can't wipe out working patterns.
+
+2. **Two banks learned nothing.** RBL and BOB burned a model call per message and never got a pattern, because their accounts weren't registered, so every transaction was flagged `pending` and excluded from sampling. Fixed: rows flagged *only* for an unregistered account are now eligible. An unlinked transaction means we couldn't attach it to an account, not that we misread it — and amount, date and reference are exactly what a pattern learns from.
+
+3. **"Once per sender per run" was the wrong rule for regeneration** and made things worse, not better. The single attempt landed early, when a bank had one sample, and nothing had enough evidence to activate. Regenerating every round is the opposite mistake — generation costs a call. The rule that works is **regenerate when two or more new verified samples have arrived**, because a format needs two before it can be trusted.
+
+**Generation counts as a model call.** It wasn't counted at first, which under-reported the true cost of an import by roughly a third.
+
+**Round-robin seeding across senders.** Taking the first N pending would spend the entire budget on whichever bank texts most and learn nothing about the others.

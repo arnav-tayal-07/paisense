@@ -225,7 +225,15 @@ from raw_sms r
 join transactions t on t.id = r.transaction_id
 where r.parse_status = 'parsed'
   and upper(r.sender) like '%%' || upper(%s) || '%%'
-  and t.review_status in ('auto', 'confirmed')
+  and (
+    t.review_status in ('auto', 'confirmed')
+    -- An unregistered account means we couldn't LINK the transaction, not
+    -- that we misread it. Amount, date and reference are still verified, and
+    -- those are the only things a pattern learns. Excluding these rows meant
+    -- a bank whose account isn't registered yet could never get a pattern,
+    -- so every one of its messages cost a model call forever.
+    or (t.review_status = 'pending' and t.review_reason like 'account ending%%')
+  )
 order by r.received_at desc
 limit %s
 """
@@ -281,6 +289,7 @@ def generate(
         return {"sender_code": sender_code, "generated": False, "reason": str(e)}
 
     results = []
+    fresh = []
 
     for group in spec.get("patterns", []):
         indices = [i for i in group.get("sample_indices", []) if 0 <= i < len(samples)]
@@ -306,6 +315,22 @@ def generate(
         if ok and len(mine) < 2:
             note = f"{note} - needs a second sample before it can be trusted"
 
+        fresh.append((group, status, note, len(mine)))
+
+    # Replace the previous generation wholesale rather than adding to it.
+    # Without this, every round appended another near-identical copy - one
+    # test run left ELEVEN active patterns for a single format.
+    #
+    # Only retire if the new set actually produced something usable, so a bad
+    # generation can't wipe out working patterns.
+    if any(s == "active" for _, s, _, _ in fresh):
+        conn.execute(
+            """update sms_patterns set status = 'retired', note = 'superseded'
+               where sender_code = %s and status <> 'retired'""",
+            (sender_code.upper(),),
+        )
+
+    for group, status, note, n_samples in fresh:
         row = conn.execute(
             """
             insert into sms_patterns
@@ -322,7 +347,7 @@ def generate(
                 group["txn_type"],
                 group.get("account_kind"),
                 status,
-                len(mine),
+                n_samples,
                 note,
             ),
         ).fetchone()
@@ -333,7 +358,7 @@ def generate(
                 "name": row["name"],
                 "status": row["status"],
                 "account_kind": row["account_kind"],
-                "samples": len(mine),
+                "samples": n_samples,
                 "note": note,
             }
         )

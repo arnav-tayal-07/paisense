@@ -22,6 +22,7 @@ from .accounts import (
     set_number_active,
     update_account,
 )
+from .importer import run as run_import, status as import_status, store_batch
 from .ingest import ingest, list_ignored, list_unparsed, reprocess_failed
 from .patterns import generate as generate_pattern, stats as pattern_stats
 from .models import AccountIn, AccountNumberIn, AccountPatch, SmsIn, TransactionIn, TransactionPatch
@@ -93,6 +94,48 @@ def post_sms(sms: SmsIn):
       failed  - should have parsed and didn't; parse_error says why
     """
     return ingest(sms)
+
+
+@app.post("/sms/batch")
+def post_sms_batch(messages: list[SmsIn]):
+    """Store many messages at once WITHOUT extracting them.
+
+    The first-install path: the phone reads months of inbox and sends it in
+    batches. Storing is free and instant; extraction happens afterwards via
+    /sms/import/run, mostly without the model at all.
+
+    Re-running the same import is harmless - duplicates are absorbed by the
+    unique constraint, which matters because someone unsure whether it worked
+    will press the button again.
+    """
+    return store_batch(messages)
+
+
+@app.get("/sms/import/status")
+def get_import_status():
+    """How much is imported and how much is still waiting, per sender.
+
+    Drives the app's progress line: "312 of 412 processed".
+    """
+    return import_status()
+
+
+@app.post("/sms/import/run")
+def post_import_run(
+    budget: int = Query(default=30, ge=1, le=200, description="Max model calls to spend"),
+    seed_per_round: int = Query(default=4, ge=1, le=20),
+):
+    """Work through the pending queue, spending at most `budget` model calls.
+
+    Alternates learning and sweeping: a few messages through the model,
+    regenerate patterns from what came back, then clear everything those
+    patterns can now handle for free. Each model call buys a pattern worth
+    dozens of messages.
+
+    Safe to call repeatedly - whatever is left stays pending and is picked up
+    next time, which is how an import survives running out of quota.
+    """
+    return run_import(budget=budget, seed_per_round=seed_per_round)
 
 
 @app.get("/sms/unparsed")
