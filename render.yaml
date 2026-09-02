@@ -1,0 +1,37 @@
+# Render deployment config, read automatically when the repo is connected.
+#
+# Kept in the repo rather than clicked into the dashboard for the same reason
+# schema.sql exists: the repo is the source of truth. A setting that lives only
+# in a web UI is a setting nobody can review, diff, or recreate.
+
+services:
+  - type: web
+    name: paisense-api
+    runtime: python
+    plan: free
+
+    # Closest Render region to the Supabase project in Mumbai. Every request
+    # the API makes crosses this gap, so it's the one that matters.
+    region: singapore
+
+    # The FastAPI app lives in backend/, not the repo root.
+    rootDir: backend
+
+    buildCommand: pip install -r requirements.txt
+
+    # host 0.0.0.0 so it accepts traffic from outside the container, and $PORT
+    # because Render assigns the port at runtime - hardcoding 8000 fails.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    envVars:
+      # sync: false means "this is a secret, set it in the dashboard".
+      # The value never appears in this file or in git.
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+
+      # Match the local interpreter so a version difference can't produce a
+      # bug that only exists in production.
+      - key: PYTHON_VERSION
+        value: "3.14.4"

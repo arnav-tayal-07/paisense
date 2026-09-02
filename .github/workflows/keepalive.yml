@@ -1,0 +1,37 @@
+# Daily ping so the free tiers don't switch themselves off.
+#
+# Its real job is Supabase, not Render. Render sleeping is a one-minute wait
+# that fixes itself on the next request. Supabase PAUSES a free project after
+# 7 days of no activity, and unpausing needs a human clicking a button in
+# their dashboard - so a week away from the app would leave it dead.
+#
+# Hitting /health wakes Render AND runs a query against Supabase, so one
+# request resets both timers.
+#
+# Cost: a couple of Render instance-hours a month out of 750. Keeping the
+# service awake around the clock would use ~744 in a 31-day month, which is
+# almost the whole allowance with no margin - hence once a day, not always.
+
+name: keepalive
+
+on:
+  schedule:
+    # 06:00 UTC = 11:30 IST. GitHub's scheduler runs late under load; exact
+    # timing doesn't matter for a 7-day window.
+    - cron: "0 6 * * *"
+  # Lets you trigger it by hand from the Actions tab to test it.
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake the API and touch the database
+        env:
+          API_URL: ${{ secrets.PAISENSE_API_URL }}
+        run: |
+          # A sleeping Render service takes ~60s to wake, so the first attempt
+          # usually times out. Retries are the normal path here, not an error.
+          curl --fail --silent --show-error \
+               --max-time 120 --retry 4 --retry-delay 30 --retry-all-errors \
+               "$API_URL/health"
