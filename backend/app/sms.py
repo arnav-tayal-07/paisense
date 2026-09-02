@@ -1,123 +1,223 @@
-"""Bank SMS parsing.
+"""Turn a bank SMS into a transaction, using an LLM (ADR 019).
 
-⚠️ SCAFFOLDING ONLY — the approach is UNDER REVIEW. See "Open decisions" in
-docs/HANDOFF.md before writing anything here. Per-bank regex may be replaced
-by, or paired with, LLM extraction, because a regex breaks whenever a bank
-changes its format. Do not just fill in the TODO patterns without resolving
-that first.
+No regexes. A regex encodes one bank's format and breaks the day that bank
+changes it; the model reads the message the way a person would, so a new bank
+or a reworded template needs no code change.
 
-Routed on the DLT sender header, never on the message body. The header is
-registered and stable; the body is not, and Amex's message never names the
-bank at all. See ADR 001 for why parsing happens server-side.
-
-Each bank gets its own handler. Adding a bank = one regex + one function +
-one entry in HANDLERS. Nothing else in the codebase changes.
+The model's job is narrow on purpose: read the message, return structured
+fields, or say it isn't a transaction. It never decides what goes in the
+database — that's Python's job below, including a guardrail that rejects
+amounts the model may have invented.
 """
 
-import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import Literal
 
+from .llm import LLMError, LLMProvider, default_provider
 from .models import TransactionIn
 
 # India has no daylight saving, so a fixed offset is exactly right and avoids
-# depending on the tzdata package (which zoneinfo needs on Windows).
+# depending on the tzdata package that zoneinfo needs on Windows.
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
 # --------------------------------------------------------------------------
-# Helpers — utility, not parsing. Use these; you don't need to write them.
+# What we ask the model for
+# --------------------------------------------------------------------------
+
+# Every field is a string, even the numbers. Letting the model emit JSON
+# numbers would hand it the float problem we spent ADR 011 avoiding —
+# 3230.00 could come back as 3230.0 or 3.23e3. Strings arrive exactly as
+# written, and Python converts them to Decimal.
+EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_transaction": {
+            "type": "boolean",
+            "description": "False for OTPs, marketing, balance alerts, delivery updates.",
+        },
+        "type": {
+            "type": "string",
+            "enum": ["expense", "income", "card_payment"],
+        },
+        "amount": {
+            "type": "string",
+            "description": "Digits exactly as they appear, e.g. '845' or '3,230.00'.",
+        },
+        "merchant": {"type": "string"},
+        "card_last4": {
+            "type": "string",
+            "description": "The masked digits, 4 or 5 of them. Amex shows 5.",
+        },
+        "occurred_at": {
+            "type": "string",
+            "description": "ISO 8601 in IST, e.g. 2026-08-27T17:31:03+05:30. Midnight if no time given.",
+        },
+        "avl_limit": {"type": "string"},
+        "reason": {
+            "type": "string",
+            "description": "If is_transaction is false, one short phrase saying what it is.",
+        },
+    },
+    "required": ["is_transaction"],
+}
+
+INSTRUCTIONS = """\
+You extract transaction details from Indian bank SMS messages.
+
+Set is_transaction false for anything that is not money moving: OTPs, \
+promotional messages, balance enquiries, statement reminders, delivery \
+notifications, failed or declined transaction alerts.
+
+When it IS a transaction, classify it:
+- expense: money left the account or was spent on a card
+- income: money arrived (salary, refund, transfer received)
+- card_payment: a payment made TOWARDS a credit card bill. This is neither \
+spending nor income - it settles purchases already recorded as expenses.
+
+Rules:
+- amount: copy the digits exactly as written, keeping commas and decimals.
+- card_last4: the masked digits only, no X or * characters. May be 4 or 5.
+- occurred_at: the time in the MESSAGE, not the time you are reading it. \
+Indian dates are day-first: 27-08-26 is 27 August 2026, 29/08/2026 is \
+29 August 2026. Use +05:30. If only a date is given, use 00:00:00.
+- Omit any field the message does not contain. Never guess a merchant, \
+an amount, or a date.
+"""
+
+
+@dataclass
+class Extraction:
+    """Result of looking at one message.
+
+    Three outcomes, matching raw_sms.parse_status:
+      parsed  - a transaction, ready to insert
+      ignored - definitely not a transaction (an OTP); nothing wrong
+      failed  - should have worked and didn't; this is the alarm
+    """
+
+    status: Literal["parsed", "ignored", "failed"]
+    txn: TransactionIn | None = None
+    error: str | None = None
+    card_last4: str | None = None
+
+
+# --------------------------------------------------------------------------
+# Conversion helpers — the model returns strings, Python decides what's valid
 # --------------------------------------------------------------------------
 
 
 def to_amount(raw: str) -> Decimal:
     """'3,230.00' -> Decimal('3230.00'). Handles '845' too."""
-    return Decimal(raw.replace(",", "").strip())
+    return Decimal(raw.replace(",", "").replace("INR", "").strip())
 
 
-def dedupe_key(bank: str, last4: str, when: datetime, amount: Decimal) -> str:
-    """Build the derived dedupe key (ADR 017).
+def build_dedupe_key(sender: str, last4: str | None, when: datetime, amount: Decimal) -> str:
+    """The derived dedupe key (ADR 017).
 
-    Card SMS carry no reference number, so the key is constructed from the
-    fields that together identify the transaction. Same inputs must always
-    produce the same string, or re-scans will duplicate.
+    Card SMS carry no reference number, so the key is built from the fields
+    that together identify the transaction. Same inputs must always produce
+    the same string, or a re-scan inserts a duplicate. That's why the bank
+    comes from the sender header rather than the message body — the body
+    wording could change, the DLT header won't.
     """
-    return f"{bank}:{last4}:{when.isoformat()}:{amount}"
+    bank = sender.upper().strip()
+    return f"{bank}|{last4 or '-'}|{when.isoformat()}|{amount}"
 
 
-# --------------------------------------------------------------------------
-# YOUR PART STARTS HERE
-#
-# Two patterns, two handlers. Run `python check_sms.py` from backend/ to see
-# exactly which fields you're getting right — it prints expected vs actual
-# per field, so a wrong capture group shows up immediately.
-# --------------------------------------------------------------------------
+def amount_appears_in(amount_raw: str, message: str) -> bool:
+    """Guardrail: the amount must literally occur in the source text.
 
-
-# Axis spend, sender AX-AXISBK-S. The five fields live on separate lines,
-# so re.MULTILINE lets you anchor on ^ instead of guessing at separators.
-#
-#   Spent INR 845
-#   Axis Bank Card no. XX7851
-#   27-08-26 17:31:03 IST
-#   PVR LIMITED
-#   Avl Limit: INR 1356517.12
-#
-# Capture: amount, last4, date, time, merchant, avl_limit
-AXIS_SPEND = re.compile(
-    r"""
-    TODO_WRITE_THE_AXIS_PATTERN
-    """,
-    re.VERBOSE | re.MULTILINE,
-)
-
-
-def parse_axis(message: str) -> TransactionIn | None:
-    """Parse an Axis card spend. Return None if the message doesn't match.
-
-    Returning None matters: Axis sends OTPs, balance alerts and marketing on
-    the same sender. Anything that isn't a spend must fall through, not crash.
+    An LLM can invent a number. This is the cheapest possible check that it
+    didn't - if '845' isn't in the message, we are not writing 845 to the
+    database. Compares with separators stripped so '3,230.00' matches
+    '3230.00' and vice versa.
     """
-    raise NotImplementedError("your turn")
-
-
-# Amex bill payment, sender TX-AMEXIN-S. One line, not five:
-#
-#   Dear Customer, a payment of INR 3,230.00 was received on your Amex Card
-#   ***71003 29/08/2026. It may take 24-48 hours for your payment to be
-#   credited. Thank you.
-#
-# Note: FIVE digits after ***, comma in the amount, DD/MM/YYYY, no time,
-# no merchant. type is 'card_payment', not 'expense' (ADR 016).
-AMEX_PAYMENT = re.compile(
-    r"""
-    TODO_WRITE_THE_AMEX_PATTERN
-    """,
-    re.VERBOSE,
-)
-
-
-def parse_amex(message: str) -> TransactionIn | None:
-    """Parse an Amex bill payment. Return None if the message doesn't match."""
-    raise NotImplementedError("your turn")
+    needle = amount_raw.replace(",", "").replace(" ", "")
+    haystack = message.replace(",", "").replace(" ", "")
+    return needle in haystack
 
 
 # --------------------------------------------------------------------------
-# Routing — done.
+# The one function the rest of the app calls
 # --------------------------------------------------------------------------
 
-# Sender headers vary by operator prefix (AX-, VM-, TX-, JD-...) but the
-# middle segment identifies the bank, so match on that rather than the whole
-# string: AX-AXISBK-S and VM-AXISBK-S are both Axis.
-HANDLERS = {
-    "AXISBK": parse_axis,
-    "AMEXIN": parse_amex,
-}
 
+def extract(
+    sender: str,
+    body: str,
+    provider: LLMProvider | None = None,
+) -> Extraction:
+    """Read one SMS and return what it is.
 
-def parse_sms(sender: str, message: str) -> TransactionIn | None:
-    """Dispatch to the right bank handler. None if unknown or unparseable."""
-    for bank_code, handler in HANDLERS.items():
-        if bank_code in sender.upper():
-            return handler(message)
-    return None
+    Never raises. A failure is a returned status, because the caller has
+    already stored the raw message and needs to record why it couldn't be
+    parsed rather than lose the whole request.
+    """
+    provider = provider or default_provider()
+
+    try:
+        data = provider.extract_json(INSTRUCTIONS, f"From: {sender}\n\n{body}", EXTRACTION_SCHEMA)
+    except LLMError as e:
+        # Provider problem, not a message problem. Worth retrying later,
+        # which is exactly what raw_sms exists to allow.
+        return Extraction(status="failed", error=str(e))
+
+    if not data.get("is_transaction"):
+        reason = data.get("reason", "not a transaction")
+        return Extraction(status="ignored", error=reason)
+
+    amount_raw = data.get("amount")
+    if not amount_raw:
+        return Extraction(status="failed", error="model returned a transaction with no amount")
+
+    # The guardrail. Cheap, and it catches the failure mode that would
+    # otherwise be silent: a plausible-looking invented number.
+    if not amount_appears_in(amount_raw, body):
+        return Extraction(
+            status="failed",
+            error=f"amount {amount_raw!r} does not appear in the message",
+        )
+
+    try:
+        amount = to_amount(amount_raw)
+    except InvalidOperation:
+        return Extraction(status="failed", error=f"could not read amount {amount_raw!r}")
+
+    occurred_raw = data.get("occurred_at")
+    try:
+        occurred_at = datetime.fromisoformat(occurred_raw) if occurred_raw else None
+    except ValueError:
+        return Extraction(status="failed", error=f"could not read date {occurred_raw!r}")
+
+    # No timezone in what came back means IST — that's where the banks are.
+    if occurred_at and occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=IST)
+
+    last4 = data.get("card_last4") or None
+
+    avl_limit = None
+    if data.get("avl_limit"):
+        try:
+            avl_limit = to_amount(data["avl_limit"])
+        except InvalidOperation:
+            # Not worth failing the whole transaction over — the amount and
+            # merchant are the point, the limit is a nice-to-have.
+            avl_limit = None
+
+    txn = TransactionIn(
+        type=data.get("type", "expense"),
+        amount=amount,
+        merchant=data.get("merchant") or None,
+        txn_time=occurred_at,
+        avl_limit=avl_limit,
+        source="sms",
+        dedupe_key=build_dedupe_key(sender, last4, occurred_at, amount) if occurred_at else None,
+    )
+
+    # card_last4 travels alongside rather than inside TransactionIn: the
+    # transactions table stores card_id, and resolving last4 -> card_id needs
+    # a database lookup that doesn't belong in a parsing function.
+    return Extraction(status="parsed", txn=txn, card_last4=last4)

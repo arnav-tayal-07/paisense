@@ -1,22 +1,23 @@
-"""Run the SMS parsers against sample messages and report field by field.
+"""Run the SMS extractor against sample messages and report field by field.
 
     cd C:\\projects\\paisense\\backend
     .\\.venv\\Scripts\\python.exe check_sms.py
 
-No database, no server — pure parsing, so the loop is fast. Edit app/sms.py,
-re-run, see what changed.
+Hits the real Gemini API, so it needs GEMINI_API_KEY in .env and an internet
+connection. No database involved.
 
-NOTE ON THE SAMPLES: card numbers, available limits and phone numbers below
-are ALTERED. The message *format* is byte-identical to the real ones — which
-is all the regexes care about — but this repo is public on GitHub, and real
-card digits and balances have no business being in it.
+NOTE ON THE SAMPLES: card digits, available limits and phone numbers below
+are ALTERED. The message *format* is identical to the real ones, which is all
+that matters here — but this repo is public on GitHub, and real card digits
+and balances have no business in it.
 """
 
 from decimal import Decimal
 
-from app.sms import parse_sms
+from app.sms import extract
 
-AXIS_SPEND_SMS = (
+AXIS_SPEND = (
+    "Axis card spend",
     "AX-AXISBK-S",
     "Spent INR 845\n"
     "Axis Bank Card no. XX1234\n"
@@ -25,76 +26,84 @@ AXIS_SPEND_SMS = (
     "Avl Limit: INR 135651.12\n"
     "Not you? SMS BLOCK 1234 to 919999999999",
     {
+        "status": "parsed",
         "type": "expense",
         "amount": Decimal("845"),
         "merchant": "PVR LIMITED",
         "txn_time": "2026-08-27T17:31:03+05:30",
         "avl_limit": Decimal("135651.12"),
-        "source": "sms",
+        "card_last4": "1234",
     },
 )
 
-AMEX_PAYMENT_SMS = (
+AMEX_PAYMENT = (
+    "Amex bill payment",
     "TX-AMEXIN-S",
     "Dear Customer, a payment of INR 3,230.00 was received on your Amex Card "
     "***56789 29/08/2026. It may take 24-48 hours for your payment to be "
     "credited. Thank you.",
     {
+        "status": "parsed",
         "type": "card_payment",
         "amount": Decimal("3230.00"),
         "merchant": None,
         "txn_time": "2026-08-29T00:00:00+05:30",
         "avl_limit": None,
-        "source": "sms",
+        "card_last4": "56789",
     },
 )
 
-# Must return None. Banks send OTPs and marketing from the same sender, and
-# a parser that guesses at those will write garbage into your table.
-NOT_A_TRANSACTION = (
+OTP = (
+    "Axis OTP (must be ignored)",
     "AX-AXISBK-S",
     "OTP for your Axis Bank transaction is 482913. Valid for 10 minutes. "
     "Do not share it with anyone.",
-    None,
+    {"status": "ignored"},
 )
 
-CASES = [
-    ("Axis spend", AXIS_SPEND_SMS),
-    ("Amex payment", AMEX_PAYMENT_SMS),
-    ("Axis OTP (should be ignored)", NOT_A_TRANSACTION),
-]
+PROMO = (
+    "Marketing (must be ignored)",
+    "AX-AXISBK-S",
+    "Get 10% cashback up to INR 500 on your Axis Bank Credit Card this "
+    "weekend! T&C apply. Click ccm.axis.bank.in/OFFER to know more.",
+    {"status": "ignored"},
+)
+
+CASES = [AXIS_SPEND, AMEX_PAYMENT, OTP, PROMO]
 
 
-def check(label, case):
-    sender, message, expected = case
+def check(label, sender, body, expected):
     print(f"\n=== {label} ===")
+    result = extract(sender, body)
 
-    try:
-        got = parse_sms(sender, message)
-    except NotImplementedError:
-        print("  not written yet")
+    if result.status != expected["status"]:
+        print(f"  FAIL status    want={expected['status']!r} got={result.status!r}")
+        if result.error:
+            print(f"       error: {result.error}")
         return
-    except Exception as e:
-        print(f"  CRASHED: {type(e).__name__}: {e}")
-        return
+    print(f"  ok   status    {result.status}")
 
-    if expected is None:
-        print("  PASS  returned None" if got is None else f"  FAIL  expected None, got {got}")
-        return
-
-    if got is None:
-        print("  FAIL  returned None, expected a transaction")
+    if result.status != "parsed":
+        if result.error:
+            print(f"       reason: {result.error}")
         return
 
     for field, want in expected.items():
-        have = getattr(got, field, None)
-        if field == "txn_time":
-            have = have.isoformat() if have else None
+        if field == "status":
+            continue
+        if field == "card_last4":
+            have = result.card_last4
+        else:
+            have = getattr(result.txn, field, None)
+            if field == "txn_time":
+                have = have.isoformat() if have else None
         mark = "ok  " if have == want else "FAIL"
         print(f"  {mark} {field:<10} want={want!r:<32} got={have!r}")
 
+    print(f"       dedupe_key: {result.txn.dedupe_key}")
+
 
 if __name__ == "__main__":
-    for label, case in CASES:
-        check(label, case)
+    for label, sender, body, expected in CASES:
+        check(label, sender, body, expected)
     print()
