@@ -17,6 +17,7 @@
 |---|---|
 | Architecture + all decisions | ✅ [decisions.md](decisions.md), ADR 001–023 |
 | GitHub repo | ✅ https://github.com/arnav-tayal-07/paisense |
+| **Live API** | ✅ **https://paisense.onrender.com** — Render free tier, Singapore. Auto-deploys on push to `main` |
 | Supabase project | ✅ `paisense`, Mumbai, Data API disabled, RLS on every table |
 | `backend/.env` | ✅ `DATABASE_URL` + `GEMINI_API_KEY`, git-ignored |
 | Python venv | ✅ `backend/.venv` — fastapi, uvicorn, psycopg[binary], python-dotenv, httpx |
@@ -25,7 +26,10 @@
 | SMS ingestion | ✅ LLM extraction, raw audit trail, replay on failure |
 | Real data in DB | ✅ 1 card account (IDFC, 2 numbers), 4 transactions, 3 raw_sms |
 | Card management routes | ❌ data functions exist, no endpoints — **next step** |
-| Agent (Phase 4) | ❌ not started |
+| Keepalive workflow | ⚠️ committed, needs `PAISENSE_API_URL` secret set in GitHub |
+| UPI messages | ⚠️ **untested, and `upi_ref` is never extracted** — see below |
+| Expo app (Phase 6) | ❌ not started — decided to build BEFORE the agent |
+| Agent (Phase 4) | ❌ deferred until after the app |
 | Automated tests | ❌ none — carried debt |
 
 Run it from `backend\`: `.\.venv\Scripts\uvicorn.exe app.main:app --reload`, then http://127.0.0.1:8000/docs
@@ -112,6 +116,24 @@ Handles with no bank-specific code: `27-08-26`, `29/08/2026` and `07 AUG 2026`; 
 | `POST /cards/{id}/numbers` | add a replacement card |
 
 Then **Phase 4 - the agent.** `llm.py` already provides the provider interface it needs.
+
+## Deploy notes
+
+Render reads settings from its dashboard, **not** from `render.yaml` — that file only applies to their Blueprint flow, and creating a Web Service manually ignores it. The settings that matter, entered by hand:
+
+- Root Directory `backend`, Region Singapore, Free instance
+- Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT` (`$PORT` must stay a variable; Render assigns it)
+- `DATABASE_URL` and `GEMINI_API_KEY` set in Render's Environment tab, never committed
+
+Free tier sleeps after 15 min idle, ~50s to wake. Supabase separately **pauses a free project after 7 days idle** and needs a manual click to restore — that is the failure worth preventing, and what the daily keepalive is for.
+
+## UPI gap — known, not yet fixed
+
+`upi_ref` and `payment_method` appear **nowhere** in `app/sms.py`. The extraction schema asks for eight fields and neither is among them, so a UPI message loses its reference number silently. No UPI message has ever been tested — all six cases are credit card messages.
+
+Planned fix, and the reasoning matters: extract `upi_ref` with a **regex**, not the LLM. A UPI reference is an exact identifier and it *is* the dedupe key — an LLM transposing one digit produces a plausible-looking string that silently breaks dedupe on the next re-scan. Regex is exact or it fails. The LLM keeps the fields that need judgement (amount, merchant, date, type). Ask the model for the reference too and flag disagreement for review.
+
+Blocked on Arnav supplying a real UPI debit SMS.
 
 ## Carried debt
 
