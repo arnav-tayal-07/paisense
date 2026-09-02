@@ -109,3 +109,54 @@ create index transactions_card_id_idx on transactions (card_id)
 -- Matches cards. Data API is disabled, but RLS on by default is the right posture.
 alter table transactions enable row level security;
 
+
+-- Every SMS the phone forwards, stored before any parsing is attempted.
+-- References transactions, so it comes last. See ADR 018.
+--
+-- Without this table a bank changing its message format loses those
+-- transactions permanently — the phone's inbox is the only copy and the
+-- failure is silent. With it, a format change becomes a backlog: fix the
+-- parser, replay the stored messages, and dedupe_key stops anything already
+-- inserted from doubling up.
+create table raw_sms (
+  id              bigint generated always as identity primary key,
+
+  -- DLT header, e.g. AX-AXISBK-S. What routing keys off.
+  sender          text not null,
+
+  -- The message exactly as received. Never normalised — this is the evidence,
+  -- and a "helpful" cleanup here would be invisible when a parse goes wrong.
+  body            text not null,
+
+  -- When the PHONE says it arrived, vs when the backend heard about it.
+  -- The two differ by however long the app was closed.
+  sms_sent_at     timestamptz not null,
+  received_at     timestamptz not null default now(),
+
+  -- pending -> not yet attempted
+  -- parsed  -> produced a transaction
+  -- ignored -> recognised as a non-transaction (OTP, marketing, balance alert)
+  -- failed  -> should have parsed and didn't; this is the early-warning list
+  parse_status    text not null default 'pending'
+                    check (parse_status in ('pending', 'parsed', 'ignored', 'failed')),
+  parse_error     text,
+  parsed_at       timestamptz,
+
+  -- ON DELETE SET NULL: deleting a transaction must not delete the evidence
+  -- it was derived from.
+  transaction_id  bigint references transactions(id) on delete set null,
+
+  created_at      timestamptz not null default now(),
+
+  -- The phone re-uploads its inbox on every open. Same sender + same text +
+  -- same send time is the same message. Without this, raw_sms grows forever.
+  constraint raw_sms_unique_message unique (sender, body, sms_sent_at)
+);
+
+-- Drives GET /sms/unparsed — the "a bank changed something" alarm. Partial,
+-- because parsed and ignored rows are the overwhelming majority.
+create index raw_sms_needs_attention_idx on raw_sms (received_at desc)
+  where parse_status in ('pending', 'failed');
+
+alter table raw_sms enable row level security;
+

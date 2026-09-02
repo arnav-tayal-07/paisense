@@ -132,3 +132,23 @@ Supporting choices in the same table:
 **Why:** With no reference in the message, `upi_ref` is null, and Postgres treats every null as distinct — so re-scanning the inbox would insert the same card transaction again on every app open. A derived key restores the property ADR 012 depends on. Deriving rather than reading is the key move: the parser can always construct one, whatever the bank sends.
 **Why `upi_ref` loses unique:** two unique constraints would be a trap. `on conflict (dedupe_key) do nothing` only swallows collisions on the column it names — a `upi_ref` collision would raise and surface as a 500 rather than being ignored. Dedupe must be exactly one column's job.
 **Trade-off:** A derived key is only as good as its inputs. Two identical amounts on the same card in the same second would collapse into one row. Judged impossible in practice; if a bank ever sends a reference, prefer it over the derived key.
+
+## 018 — Store every raw SMS before parsing it
+
+**Context:** Arnav asked why the parser can't be universal — work regardless of bank, format or future changes. It can't: any extraction method, regex or LLM, can fail on input it wasn't built for.
+**Decision:** A `raw_sms` table holding sender, body, send time and a parse status, written **before** extraction is attempted. Parsing updates the row rather than being a precondition for storing it.
+**Why:** This turns the unanswerable question ("how do we never fail?") into a survivable one ("what happens when we do?"). Without it, a bank reformatting means those transactions are lost permanently — the phone's inbox is the only copy, the failure is silent, and it goes unnoticed for weeks. With it, the messages are all on disk: fix the parser, replay them, and `dedupe_key` (ADR 017) stops anything already inserted from doubling up. Replay being safe is what makes the whole thing work, and that property already exists and is tested.
+**Consequence:** It also decouples the parser decision from everything else. Regex, LLM or hybrid can be swapped later and re-run over stored history, so the approach question stops being irreversible.
+**Trade-off:** Every message is stored twice — once raw, once parsed. At a handful of SMS a day that's negligible, and the raw copy is the audit trail for any transaction whose origin is ever in doubt.
+
+**Four states, not two.** `ignored` (an OTP, correctly skipped) is deliberately distinct from `failed` (a spend the parser should have understood). Collapsing them would bury the alarm: `GET /sms/unparsed` lists only `failed` and `pending`, which is the signal that a bank changed something.
+
+## 019 — LLM extraction on Gemini free tier, including real SMS (amends 009)
+
+**Context:** ADR 009 accepted the free tier's "prompts may be used for product improvement" clause on the explicit basis that test data was fake, and flagged a revisit before real financial data flowed. This is that revisit.
+**Decision:** Extract transactions from SMS with an LLM on the Gemini free tier, using real messages. No regexes for now.
+**Why:** Arnav's requirement was a parser that works across banks and formats without needing updates — a regex encodes a format and breaks when it changes, so it cannot meet that bar. An LLM can. The assistant raised the privacy trade-off twice: free-tier prompts may be sampled for human review and used as training signal, and the exposure is an identity-linked record of personal spending. Arnav weighed it and accepted: the data is his own, a bank SMS contains no full card number or credentials, and free tier means unmetered iteration during development.
+**What we gave up:** The messages cannot be un-sent, and training influence is irreversible. Revisit if the app is ever used by anyone else, where the data would no longer be his to trade away.
+**Reversibility:** Keep the provider behind one interface (ADR 009's original point) so switching to a no-training tier is a one-file change. `raw_sms` (ADR 018) stores every message, so re-extracting under a different provider later is a replay, not a re-collection.
+
+**This also settles hybrid vs LLM-only: LLM-only.** The strongest argument for the hybrid was privacy — regexes would keep known banks local so only unknown formats left the server. With free tier accepted, that argument is gone, leaving only latency and cost, and neither matters at a handful of messages a day. Regexes can be added later purely as an optimisation for a high-volume bank. Nothing needs them now, and skipping them is what Arnav wanted from the start.
