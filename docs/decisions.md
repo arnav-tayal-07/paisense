@@ -277,3 +277,25 @@ The model is *also* asked for the reference — not to use, but so a disagreemen
 **Trade-off:** more columns, and the `accounts` rename touched every module. Cheap now with four transactions in the table; expensive after a year of data.
 
 **Verified across four banks and ten cases:** Axis, Amex, IDFC (purchase + standing instruction), RBL (debit with no time, credit with a different date format and label on the same sender), BOB (VPA payee, `AvlBal`, and a `(2026:08:27 08:01:42)` colon date format seen nowhere else) — plus an OTP, a marketing message and an account-linking notice, all correctly ignored.
+
+## 027 — Native Android in Kotlin, superseding ADR 002
+
+**Context:** ADR 002 chose React Native + Expo. Building the app forced a closer look, and the reasoning no longer holds for this app specifically.
+
+**Decision:** Native Android, Kotlin + Jetpack Compose, built locally in Android Studio over USB. No React Native, no Expo, no EAS.
+
+**Why the original reasoning expired:** ADR 002's case for React Native was code sharing across iOS and Android, plus "one new language = zero" since JavaScript was already known. But **iOS cannot read SMS at all** — Apple has never exposed the inbox to third-party apps. PaiSense can therefore only ever be an Android app, so React Native's abstraction was being paid for a cross-platform benefit that could never be collected.
+
+**Three reliability arguments, in order of weight:**
+
+1. **`BroadcastReceiver` fires when the app is closed.** Android wakes a native receiver the instant an SMS arrives, even if the app hasn't been opened in a week. React Native's JS thread isn't running then, and background delivery is exactly where the community bridge modules are weakest.
+2. **No bridge on the critical path.** Kotlin calls the SMS APIs directly. The RN route depends on `@maniac-tech/react-native-expo-read-sms` or `react-native-get-sms-android` — community modules documenting support only to Expo SDK 50, with open 2026 bug reports, sitting between the app and its core data source.
+3. **`WorkManager` for the outbox.** Messages must survive Render's cold start, so the phone needs its own retry queue. Android provides one that survives reboots and handles backoff; in React Native it would be hand-rolled.
+
+**What we gave up:** Kotlin and Jetpack Compose are both new to Arnav, where JavaScript was not — the honest cost, and it shifts the pair-mode balance toward the assistant writing more than it would in JS. Also a ~10GB Android Studio install, and no web version to share as a URL. Cross-platform support is *not* in this list, because it was never achievable.
+
+**What we gained beyond reliability:** USB debugging is a faster loop than EAS cloud builds — install to the phone in seconds, with no queue and no free-tier build limits.
+
+**Rejected alternative worth recording:** a tiny native SMS forwarder plus a web UI on Vercel. It would have put most of the work in JavaScript and produced a shareable URL, but due-date reminders (ADR 005) and the biometric gate (ADR 007) both need a real app, so the native app was needed regardless — and building two things is worse than building one.
+
+**Not affected:** ADR 001 (parsing stays server-side), 005 (reminders on-device), 006 (voice on-device), 007 (fingerprint gate). Those decisions were about *where* logic runs, not which framework runs it.
