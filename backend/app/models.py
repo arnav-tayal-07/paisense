@@ -13,6 +13,25 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class SmsIn(BaseModel):
+    """One bank SMS, forwarded by the phone exactly as received."""
+
+    # DLT header, e.g. AX-AXISBK-S. Routing and card disambiguation both key
+    # off this, and it's the only part of a message that reliably names the
+    # bank — Amex never names itself in the body.
+    sender: str
+
+    # The message verbatim. Not cleaned, trimmed or normalised by the phone:
+    # this is evidence, and a well-meaning transformation on the client would
+    # be invisible here when a parse goes wrong.
+    message: str
+
+    # When the PHONE received it, which is not when the backend hears about
+    # it — the app may have been closed for days. Part of the uniqueness key,
+    # so it must come from the SMS itself, not from the upload time.
+    sms_sent_at: datetime
+
+
 class TransactionIn(BaseModel):
     """What a client must send to create a transaction."""
 

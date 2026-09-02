@@ -16,17 +16,32 @@ create table cards (
   -- that reliably identifies the bank — Amex never names itself in the body.
   issuer_code    text,
 
-  -- Values 29-31 must be clamped to the last day of shorter months when
-  -- computing due dates. February exists.
+  -- Day the bill is generated. Values 29-31 must be clamped to the last day
+  -- of shorter months when computing dates. February exists.
   statement_day  int not null check (statement_day between 1 and 31),
-  due_days_after int not null default 20,
+
+  -- Two ways a card can express its due date, and real cards use both:
+  --   due_day        - fixed day of the following month ("due on the 8th")
+  --   due_days_after - fixed offset from the statement ("due 20 days later")
+  -- A card with statement on the 24th and payment due on the 8th is 15 days
+  -- in January and 12 in February, so an offset would drift by three days
+  -- and in February would put the reminder AFTER the due date.
+  due_day        int check (due_day between 1 and 31),
+  due_days_after int,
+
   credit_limit   numeric(12, 2),
 
   -- A closed account keeps its history but drops out of due-date reminders
   -- and "which cards do I have" lists.
   is_active      boolean not null default true,
 
-  created_at     timestamptz not null default now()
+  created_at     timestamptz not null default now(),
+
+  -- Exactly one due rule. Neither set means no due date can be computed and
+  -- reminders silently never fire; both set means two answers that will
+  -- eventually disagree.
+  constraint cards_due_rule_check
+    check ((due_day is null) <> (due_days_after is null))
 );
 
 -- The physical cards on an account. One IDFC account can carry a Visa and a

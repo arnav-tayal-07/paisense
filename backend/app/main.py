@@ -13,7 +13,8 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from psycopg.errors import ForeignKeyViolation
 
 from .db import get_conn
-from .models import TransactionIn
+from .ingest import ingest, list_unparsed, reprocess_failed
+from .models import SmsIn, TransactionIn
 from .transactions import (
     create_transaction,
     delete_transaction,
@@ -57,6 +58,43 @@ def post_transaction(txn: TransactionIn, response: Response):
 
     response.status_code = 201 if created else 200
     return row
+
+
+@app.post("/sms")
+def post_sms(sms: SmsIn):
+    """Take one bank SMS, store it, and extract a transaction from it.
+
+    Always 200, even when the message can't be understood. An unparseable
+    SMS is a recorded outcome, not a failed request — the phone did its job
+    by forwarding it, and the message is stored either way. The response
+    says what happened via raw_sms.parse_status:
+
+      parsed  - a transaction was created or matched; transaction_id is set
+      ignored - an OTP or marketing message, correctly skipped
+      failed  - should have parsed and didn't; parse_error says why
+    """
+    return ingest(sms)
+
+
+@app.get("/sms/unparsed")
+def get_unparsed_sms(limit: int = Query(default=50, ge=1, le=200)):
+    """Messages needing attention — never attempted, or attempted and failed.
+
+    This is the alarm for a bank changing its message format. Correctly
+    ignored OTPs are excluded; including them would bury the signal.
+    """
+    return list_unparsed(limit)
+
+
+@app.post("/sms/reprocess")
+def post_reprocess_sms(limit: int = Query(default=50, ge=1, le=200)):
+    """Retry every failed message. Safe to run any time.
+
+    Use after fixing a prompt or adding a card that transactions couldn't be
+    linked to. Replay is only safe because dedupe_key makes re-inserting an
+    existing transaction a no-op.
+    """
+    return reprocess_failed(limit)
 
 
 @app.get("/transactions")

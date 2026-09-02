@@ -172,3 +172,38 @@ Supporting choices in the same table:
 - *Re-running setup* — `add_card_number` uses `ON CONFLICT DO NOTHING`, so adding the same number twice is a no-op rather than an error.
 
 **Also added: `transactions.card_last4`.** Text, not a foreign key — a snapshot of what the message actually said, in the same spirit as `raw_sms`. It survives a `card_numbers` row being edited or deleted, needs no join to read, and can't drift from the evidence. `card_id` still carries the real relationship for aggregation. Together they let you split RuPay (UPI) spend from Visa (swipe) on a single account.
+
+## 021 — A due date can be a fixed day, not only an offset
+
+**Context:** `cards.due_days_after` assumed every card says "payment due N days after the statement." Arnav's IDFC card generates its statement on the 24th and takes payment on the **8th of the following month**.
+**Decision:** Add `due_day` (fixed day of the following month). Keep `due_days_after` (fixed offset). Exactly one must be set, enforced by `check ((due_day is null) <> (due_days_after is null))`.
+**Why:** 24th → 8th is 15 days in January, 12 in February, 14 in April. Storing a single offset would drift by up to three days, and in February would schedule the reminder *after* the payment was due — the failure mode the reminders exist to prevent. Both styles are common on real cards, so the schema has to express either.
+**Why not just store an explicit due date per statement:** that requires a row per billing cycle and something to generate it. A rule plus `statement_day` computes any cycle's dates on demand, and cards change their rule roughly never.
+**Trade-off:** Date computation must now branch on which field is set, and clamp `due_day` 29–31 to the last day of shorter months.
+
+**Pattern worth noting:** this is the fourth schema assumption broken by looking at real data rather than imagining it — after `char(4)` vs Amex's five digits (015), bill payments having no valid `type` (016), card SMS carrying no reference (017), and one account carrying two physical cards (020). Every one was cheap to fix while the tables were empty and would have been expensive with a year of rows in them.
+
+## 022 — Model choice is driven by free-tier quota, not quality
+
+**Context:** Extraction was built on `gemini-3.6-flash`. Mid-testing every call started timing out, then returned 429: `GenerateRequestsPerDayPerProjectPerModel-FreeTier, limit: 20`. Twenty requests **per day**.
+**Decision:** Default to `gemini-3.1-flash-lite`, overridable with `GEMINI_MODEL` in `.env`.
+**Why:** Twenty a day is unusable — a single busy day of spending produces that many SMS before any retries or testing. The lite model draws on a separate, far larger free pool and passed all six extraction cases identically, including the two hardest: 12-hour time (`08:38 PM` → `20:38`) and three different day-first date formats. There was no quality reason to prefer the larger model for this task; extraction is constrained, schema-bound, and short.
+**Trade-off:** A lite model may handle a genuinely unusual message worse. `raw_sms` makes that recoverable — switch `GEMINI_MODEL`, run `POST /sms/reprocess`, and the stored messages are re-extracted.
+
+**A 429 now raises `QuotaExceeded`, not a generic error**, and the message includes which quota and the retry delay. "429" alone is useless: a per-minute limit clears in seconds, a per-day limit does not, and the response is different in each case.
+
+**What this incident proved about the design.** All three messages arriving during the outage were stored, marked `failed` with the reason, and appeared in `GET /sms/unparsed`. Nothing was lost. Once quota returned, `POST /sms/reprocess` replayed them: 2 parsed, 1 correctly ignored, 0 failed. That is precisely the scenario ADR 018 was written for, and it happened by accident on the first real run — a provider outage is not hypothetical, and without `raw_sms` those three transactions would have been gone permanently and silently.
+
+## 023 — Automatic fallback down a chain of models
+
+**Context:** ADR 022 switched models to dodge a 20/day limit, but that only moves the wall. The 429 names the quota `GenerateRequestsPerDayPerProjectPerModel` — **per model** — so each model has an independent daily allowance.
+**Decision:** `GeminiProvider` takes an ordered chain and tries each in turn. Exhausting one falls through to the next; the effective daily budget is the sum of the chain rather than the first entry.
+**Why:** Free-tier limits are the binding constraint on this project, not cost or quality. Five models with separate pools is several times the headroom for no money and about thirty lines of code.
+
+**What falls through and what doesn't.** `QuotaExceeded` (429) and `ModelUnavailable` (404, 503, timeout) advance to the next model. Anything else — a malformed request, a bad schema — fails immediately, because it would fail identically on every model and retrying would burn four more quotas to learn the same thing.
+
+**Timeouts count as unavailable.** Observed for real: an exhausted model stalled for a full 30 seconds before it began returning clean 429s. A model that hangs is no more useful than one that's out of quota.
+
+**It remembers what worked.** The last successful model is tried first next time, so a healthy fallback isn't re-tested against an exhausted primary on every message. The chain wraps around rather than truncating, so once daily quotas reset it drifts back to the preferred model on its own.
+
+**Configuration:** `GEMINI_MODEL` pins one model (for testing a specific one); `GEMINI_MODELS` overrides the whole chain as a comma-separated list. The default chain was verified against the live API — 2.5-series models return 404 on this key and are excluded.
