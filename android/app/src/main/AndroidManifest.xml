@@ -17,6 +17,13 @@
          is happening. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- The import runs as a foreground service so Android doesn't kill it
+         mid-way. Asking WorkManager for a dataSync service without declaring
+         it here crashes on start with "foregroundServiceType 0x1 is not a
+         subset of 0x0". -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -38,6 +45,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- WorkManager declares this service itself; merging adds the type
+             our worker asks for. tools:node="merge" edits the existing entry
+             rather than declaring a competing one. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
     </application>
 
 </manifest>

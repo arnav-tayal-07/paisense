@@ -47,6 +47,25 @@ object SmsReader {
         return address.any { it.isLetter() }
     }
 
+    /**
+     * Does the message mention an amount of money?
+     *
+     * Every Indian bank writes amounts as INR or Rs followed by digits, so a
+     * message without one cannot be a transaction. On a real inbox this cut
+     * 293 messages to 184 and — the part that matters — 95 distinct senders
+     * to 33, because OTPs, delivery updates and IPO notices all vanish.
+     *
+     * Deliberately NOT stricter than this. Requiring a verb like "debited"
+     * was tried and dropped real transactions: "Rs.1500.00 Dr. from A/C...",
+     * "Thank you for payment of INR 1,500.00 towards your Credit Card", and
+     * "Payment of Rs 149.00 using Apay balance is successful" are all genuine
+     * and all phrased differently. Deciding what counts as a transaction is
+     * the model's job; the phone's job is only to skip what obviously isn't.
+     */
+    private val MONEY = Regex("""(?:INR|RS\.?)\s*[\d,]+(?:\.\d{1,2})?""", RegexOption.IGNORE_CASE)
+
+    private fun mentionsMoney(body: String): Boolean = MONEY.containsMatchIn(body)
+
     /** How many bank messages exist in the last [months] months. Cheap; no upload. */
     fun count(context: Context, months: Int): Int = read(context, months).size
 
@@ -82,6 +101,7 @@ object SmsReader {
 
                 val body = cursor.getString(bodyCol) ?: continue
                 if (body.isBlank()) continue
+                if (!mentionsMoney(body)) continue
 
                 out += OutgoingSms(
                     sender = address,
