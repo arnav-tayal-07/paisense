@@ -81,6 +81,25 @@ object Api {
             }
         }
 
+    private suspend fun delete(path: String) =
+        withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url(BuildConfig.API_BASE + path)
+                .header("X-API-Key", BuildConfig.API_KEY)
+                .delete()
+                .build()
+            client.newCall(request).execute().use { response ->
+                // 404 is treated as success: the row is gone, which is what
+                // the caller wanted. Failing here would strand a deleted item
+                // on screen with an error under it.
+                if (!response.isSuccessful && response.code != 404) {
+                    throw ApiException(
+                        "HTTP ${response.code}: ${response.body?.string().orEmpty().take(200)}"
+                    )
+                }
+            }
+        }
+
     private suspend fun post(path: String, body: String? = null): String =
         withContext(Dispatchers.IO) {
             if (BuildConfig.API_KEY.isBlank()) {
@@ -114,16 +133,42 @@ object Api {
      * accounts — counting those as earnings makes the figure meaningless.
      * Only what you type counts.
      */
-    suspend fun addIncome(amount: String, source: String, date: String) {
+    suspend fun addIncome(amount: String, source: String, date: String) =
+        addTransaction("income", amount, source, date)
+
+    /**
+     * Record a transaction by hand.
+     *
+     * `accountId` matters more than it looks: the lists are filtered by
+     * account kind, so an entry with no account is accepted by the server and
+     * then appears on no screen at all. The caller always supplies one.
+     *
+     * Amount travels as a string. Money never becomes a float on the way
+     * (ADR 032) — a JSON number would round it in transit.
+     */
+    suspend fun addTransaction(
+        type: String,
+        amount: String,
+        payee: String,
+        date: String,
+        accountId: Long? = null,
+    ) {
         val body = buildJsonObject {
-            put("type", JsonPrimitive("income"))
+            put("type", JsonPrimitive(type))
             put("amount", JsonPrimitive(amount))
-            put("merchant", JsonPrimitive(source))
+            put("merchant", JsonPrimitive(payee))
             put("txn_time", JsonPrimitive(date))
             put("source", JsonPrimitive("manual"))
+            accountId?.let { put("account_id", JsonPrimitive(it)) }
         }
         post("/transactions", json.encodeToString(JsonObject.serializer(), body))
     }
+
+    /** Every account, so a manual entry can name where the money went. */
+    suspend fun accounts(): List<Account> = json.decodeFromString(get("/accounts"))
+
+    /** Remove a transaction. Used by swipe-to-delete. */
+    suspend fun deleteTransaction(id: Long) = delete("/transactions/$id")
 
     /**
      * Rename or recategorise a transaction.

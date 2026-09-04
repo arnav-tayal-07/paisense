@@ -2,6 +2,7 @@ package com.paisense.app.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -17,6 +18,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -32,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.paisense.app.data.Account
 import com.paisense.app.data.Due
 import com.paisense.app.data.Transaction
 
@@ -42,7 +45,11 @@ import com.paisense.app.data.Transaction
  * total income, money actually spent, and what the card owes.
  */
 @Composable
-fun SummarySection(data: HomeData, modifier: Modifier = Modifier) {
+fun SummarySection(
+    data: HomeData,
+    onSetLimit: (Long, String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -96,7 +103,7 @@ fun SummarySection(data: HomeData, modifier: Modifier = Modifier) {
             }
         }
 
-        items(data.dues, key = { it.accountId }) { DueCard(it) }
+        items(data.dues, key = { it.accountId }) { DueCard(it, onSetLimit) }
     }
 }
 
@@ -111,12 +118,27 @@ fun SummarySection(data: HomeData, modifier: Modifier = Modifier) {
 @Composable
 fun CardSection(
     dues: List<Due>,
-    onSetLimit: ((Long, String) -> Unit)? = null,
+    onSetLimit: (Long, String) -> Unit,
     spends: List<Transaction>,
     modifier: Modifier = Modifier,
     onEdit: ((Transaction, String, String) -> Unit)? = null,
+    onDelete: ((Long) -> Unit)? = null,
+    cards: List<Account> = emptyList(),
+    onAdd: ((String, String, String, Long) -> Unit)? = null,
 ) {
     var editing by remember { mutableStateOf<Transaction?>(null) }
+    var adding by remember { mutableStateOf(false) }
+
+    if (adding) {
+        AddExpenseDialog(
+            accounts = cards,
+            title = "Add card expense",
+            onDismiss = { adding = false },
+            onSave = { amt, payee, date, account ->
+                onAdd?.invoke(amt, payee, date, account); adding = false
+            },
+        )
+    }
 
     editing?.let { txn ->
         EditTransactionDialog(txn, onDismiss = { editing = null }) { name, cat ->
@@ -124,22 +146,36 @@ fun CardSection(
         }
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        items(dues, key = { it.accountId }) { DueCard(it, onSetLimit) }
+    Box(modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 88.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(dues, key = { it.accountId }) { DueCard(it, onSetLimit) }
 
-        if (spends.isNotEmpty()) {
-            item { Text("Charged to cards", style = MaterialTheme.typography.titleMedium) }
-            items(spends, key = { "s" + it.id }) { txn ->
-                Card(Modifier.fillMaxWidth().clickable(enabled = onEdit != null) { editing = txn }) {
-                    TxnRow(txn)
+            if (spends.isNotEmpty()) {
+                item { Text("Charged to cards", style = MaterialTheme.typography.titleMedium) }
+                items(spends, key = { "s" + it.id }) { txn ->
+                    SwipeToDelete(
+                        label = "${txn.payee} — ₹${txn.amount}",
+                        onDelete = { onDelete?.invoke(txn.id) },
+                    ) {
+                        Card(
+                            Modifier.fillMaxWidth()
+                                .clickable(enabled = onEdit != null) { editing = txn }
+                        ) { TxnRow(txn) }
+                    }
                 }
             }
         }
 
+        if (onAdd != null && cards.isNotEmpty()) {
+            ExtendedFloatingActionButton(
+                onClick = { adding = true },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            ) { Text("+  Add card expense") }
+        }
     }
 }
 
@@ -166,14 +202,14 @@ private fun TxnRow(txn: Transaction) {
 }
 
 @Composable
-private fun DueCard(due: Due, onSetLimit: ((Long, String) -> Unit)? = null) {
+private fun DueCard(due: Due, onSetLimit: (Long, String) -> Unit) {
     var editingLimit by remember { mutableStateOf(false) }
 
     if (editingLimit) {
         LimitDialog(
             current = due.creditLimit,
             onDismiss = { editingLimit = false },
-            onSave = { onSetLimit?.invoke(due.accountId, it); editingLimit = false },
+            onSave = { onSetLimit(due.accountId, it); editingLimit = false },
         )
     }
 
@@ -315,6 +351,9 @@ fun LedgerSection(
     emptyMessage: String,
     modifier: Modifier = Modifier,
     onEdit: ((Transaction, String, String) -> Unit)? = null,
+    onDelete: ((Long) -> Unit)? = null,
+    accounts: List<Account> = emptyList(),
+    onAdd: ((String, String, String, Long) -> Unit)? = null,
 ) {
     // Tapping a row opens the rename dialog. Most UPI rows arrive with only a
     // masked account number, so naming them by hand is the only way they ever
@@ -332,21 +371,40 @@ fun LedgerSection(
         )
     }
 
-    if (transactions.isEmpty()) {
-        Column(
-            modifier.fillMaxSize().padding(32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) { Text(emptyMessage, style = MaterialTheme.typography.bodyLarge) }
-        return
+    var adding by remember { mutableStateOf(false) }
+
+    if (adding) {
+        AddExpenseDialog(
+            accounts = accounts,
+            title = "Add expense",
+            onDismiss = { adding = false },
+            onSave = { amt, payee, date, account ->
+                onAdd?.invoke(amt, payee, date, account); adding = false
+            },
+        )
     }
 
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    Box(modifier.fillMaxSize()) {
+        if (transactions.isEmpty()) {
+            Column(
+                Modifier.fillMaxSize().padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) { Text(emptyMessage, style = MaterialTheme.typography.bodyLarge) }
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            // Bottom padding clears the button: without it the last row sits
+            // under it and can be neither read nor swiped.
+            contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 88.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
         items(transactions, key = { it.id }) { txn ->
+          SwipeToDelete(
+              label = "${txn.payee} — ₹${txn.amount}",
+              onDelete = { onDelete?.invoke(txn.id) },
+          ) {
             Card(Modifier.fillMaxWidth().clickable(enabled = onEdit != null) { editing = txn }) {
                 Row(
                     Modifier.fillMaxWidth().padding(16.dp),
@@ -369,6 +427,15 @@ fun LedgerSection(
                     )
                 }
             }
+          }
+        }
+        }
+
+        if (onAdd != null && accounts.isNotEmpty()) {
+            ExtendedFloatingActionButton(
+                onClick = { adding = true },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            ) { Text("+  Add expense") }
         }
     }
 }

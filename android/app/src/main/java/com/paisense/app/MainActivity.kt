@@ -16,6 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -94,6 +95,7 @@ private val TABS = listOf(
 private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
     var tab by remember { mutableIntStateOf(0) }
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
 
     // Refetch whenever the app comes back to the foreground.
     //
@@ -132,8 +134,17 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
             return@Scaffold
         }
 
+        // Pull down to refetch. The app already refreshes when it returns
+        // to the foreground, but that cannot help while you are looking at
+        // the screen — an import finishing in the background has no way to
+        // announce itself, so there has to be a way to ask.
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = viewModel::refresh,
+            modifier = content,
+        ) {
         when (val s = state) {
-            is HomeState.Loading -> Centered(content) {
+            is HomeState.Loading -> Centered(Modifier) {
                 CircularProgressIndicator()
                 Text(
                     "Waking the server…",
@@ -142,7 +153,7 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
                 )
             }
 
-            is HomeState.Failed -> Centered(content) {
+            is HomeState.Failed -> Centered(Modifier) {
                 Text("Couldn't load", style = MaterialTheme.typography.titleMedium)
                 Text(
                     s.message,
@@ -154,11 +165,15 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
             }
 
             is HomeState.Loaded -> when (tab) {
-                0 -> SummarySection(s.data, content)
+                0 -> SummarySection(s.data, viewModel::setCreditLimit)
 
                 1 -> LedgerSection(
-                    s.data.expenses, "No spending recorded", content,
+                    s.data.expenses, "No spending recorded", Modifier,
                     onEdit = { txn, name, cat -> viewModel.rename(txn.id, name, cat) },
+                    onDelete = viewModel::delete,
+                    // Only bank accounts: this tab is money that left one.
+                    accounts = s.data.accounts.filter { it.isBank },
+                    onAdd = viewModel::addExpense,
                 )
 
                 // Income is TYPED IN, never taken from an SMS: a bank credit
@@ -167,17 +182,20 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
                 2 -> IncomeScreen(
                     income = s.data.income,
                     onAdd = viewModel::addIncome,
-                    modifier = content,
+                    onDelete = viewModel::delete,
                 )
 
                 else -> CardSection(
                     dues = s.data.dues,
                     onSetLimit = viewModel::setCreditLimit,
                     spends = s.data.cardSpends,
-                    modifier = content,
                     onEdit = { txn, name, cat -> viewModel.rename(txn.id, name, cat) },
+                    onDelete = viewModel::delete,
+                    cards = s.data.accounts.filter { it.isCard },
+                    onAdd = viewModel::addExpense,
                 )
             }
+        }
         }
     }
 }

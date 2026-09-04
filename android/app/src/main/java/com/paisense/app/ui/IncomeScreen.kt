@@ -47,6 +47,7 @@ import java.time.LocalDate
 fun IncomeScreen(
     income: List<Transaction>,
     onAdd: (amount: String, source: String, date: String) -> Unit,
+    onDelete: ((Long) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var showDialog by remember { mutableStateOf(false) }
@@ -68,7 +69,12 @@ fun IncomeScreen(
                     )
                 }
             } else {
-                items(income, key = { it.id }) { IncomeRow(it) }
+                items(income, key = { it.id }) { txn ->
+                    SwipeToDelete(
+                        label = "${txn.payee} — ₹${txn.amount}",
+                        onDelete = { onDelete?.invoke(txn.id) },
+                    ) { IncomeRow(txn) }
+                }
             }
         }
 
