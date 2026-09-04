@@ -2,6 +2,9 @@ package com.paisense.app.data
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
  * One row from GET /transactions.
@@ -43,4 +46,31 @@ data class Transaction(
     /** Card bill payments are neither spending nor earning — see ADR 016. */
     val isCardPayment: Boolean
         get() = type == "card_payment"
+
+    /**
+     * The date the money moved, in the phone's own timezone.
+     *
+     * NOT `txnTime.take(10)`. The backend sends an instant, and psycopg
+     * renders it in UTC — so a purchase at midnight IST arrives as
+     * `2026-08-31T18:30:00+00:00` and chopping the first ten characters
+     * displays the wrong day. Anything after 17:30 IST was off by one.
+     *
+     * Converting on the device is right rather than convenient: the phone is
+     * the only thing that knows where its owner is, and this keeps working
+     * unchanged if you ever spend money in another timezone.
+     */
+    val localDate: String
+        get() = try {
+            Instant.parse(txnTime.replace(" ", "T"))
+                .atZone(ZoneId.systemDefault())
+                .format(DATE_FORMAT)
+        } catch (_: Exception) {
+            // A malformed timestamp should cost you a nicely formatted date,
+            // not the whole screen.
+            txnTime.take(10)
+        }
+
+    private companion object {
+        val DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy")
+    }
 }

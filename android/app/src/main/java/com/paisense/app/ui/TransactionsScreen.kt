@@ -82,10 +82,10 @@ private fun TransactionRow(txn: Transaction) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(txn.payee, style = MaterialTheme.typography.bodyLarge)
                 Text(
-                    // Just the date for now. Formatting the full timestamp
-                    // properly needs a timezone decision, which belongs with
-                    // the rest of the display work rather than here.
-                    txn.txnTime.take(10),
+                    // localDate, not txnTime: the backend sends an instant in
+                    // UTC, so slicing the string shows the wrong day for
+                    // anything after 17:30 IST.
+                    txn.localDate,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
