@@ -244,10 +244,29 @@ def build_dedupe_key(
     be silently discarded. That is precisely why the reference is pulled out
     by regex rather than trusted to a model.
     """
+    # A reference stands alone, with NO bank prefix. UPI references are issued
+    # centrally and are globally unique, so the same payment produces the same
+    # reference in every message about it. Prefixing with the sender defeated
+    # that entirely: one transfer texted about by BOB, RBL and SBI became three
+    # transactions, because all three keys differed.
     if reference:
-        return f"{sender.upper().strip()}|ref:{reference}"
-    bank = sender.upper().strip()
-    return f"{bank}|{last4 or '-'}|{when.isoformat()}|{amount}"
+        return f"ref:{reference}"
+
+    # No reference, so fall back to the derived key — but keyed on the ISSUER,
+    # not the full sender header. Banks send the same alert from several
+    # headers: IDFC used both CP-IDFCFB-S and JM-IDFCFB-S for one identical
+    # message, which produced two rows for one purchase. The issuer segment is
+    # the same across those, while still keeping different banks apart.
+    return f"{issuer_code(sender)}|{last4 or '-'}|{when.isoformat()}|{amount}"
+
+
+def issuer_code(sender: str) -> str:
+    """AX-AXISBK-S -> AXISBK. The middle segment identifies the bank.
+
+    Falls back to the whole header for anything not in DLT shape.
+    """
+    parts = (sender or "").upper().strip().split("-")
+    return parts[1] if len(parts) >= 3 else (sender or "").upper().strip()
 
 
 def amount_appears_in(amount_raw: str, message: str) -> bool:
