@@ -22,3 +22,18 @@ Thumbs.db
 
 # Local chat archives — personal record, never push
 chat-archive/
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/captures/
+android/.idea/
+android/.cxx/
+# Contains the absolute path to YOUR Android SDK - machine-specific, and it
+# breaks the build on any other machine if committed.
+android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
