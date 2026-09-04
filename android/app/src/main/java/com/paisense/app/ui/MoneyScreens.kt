@@ -52,7 +52,6 @@ fun SummarySection(data: HomeData, modifier: Modifier = Modifier) {
                         Text("Summary", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(12.dp))
                         Figure("Income entered", summary.totalIncome, positive = true)
-                        Figure("Received (bank credits)", summary.buckets.received.total, muted = true)
                         HorizontalDivider(Modifier.padding(vertical = 12.dp))
                         Figure("Spent from accounts", summary.buckets.accountSpend.total)
                         Figure("Spent on cards", summary.buckets.cardSpend.total)

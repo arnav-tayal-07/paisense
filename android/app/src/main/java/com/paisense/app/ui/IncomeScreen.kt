@@ -35,17 +35,17 @@ import com.paisense.app.data.Transaction
 import java.time.LocalDate
 
 /**
- * Income you typed, and — separately — money the bank says arrived.
+ * Income, and only income: what you typed.
  *
- * They are not the same thing and merging them was making the total useless.
- * A bank credit can be a refund, a friend settling a split, a cheque, or you
- * moving your own money between accounts. Only the entries below the first
- * heading count as earnings.
+ * Bank credits are deliberately NOT shown here at all. A credit can be a
+ * refund, a friend settling a split, a cheque, or your own money moving
+ * between accounts — one of Arnav's was literally himself. Listing them
+ * alongside real earnings invited exactly the confusion this screen exists
+ * to prevent. They remain in the database, just not on this screen.
  */
 @Composable
 fun IncomeScreen(
     income: List<Transaction>,
-    received: List<Transaction>,
     onAdd: (amount: String, source: String, date: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -57,34 +57,18 @@ fun IncomeScreen(
             contentPadding = PaddingValues(16.dp, 16.dp, 16.dp, 88.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item { SectionHeading("Income you've entered") }
-
             if (income.isEmpty()) {
                 item {
                     Text(
-                        "Nothing yet. Add your salary or any other earnings with the button below.",
+                        "Nothing yet. Add your salary or any other earnings with " +
+                            "the button below.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(vertical = 8.dp),
                     )
                 }
             } else {
-                items(income, key = { it.id }) { IncomeRow(it, earned = true) }
-            }
-
-            if (received.isNotEmpty()) {
-                item {
-                    Spacer(Modifier.height(16.dp))
-                    SectionHeading("Money received (${received.size})")
-                    Text(
-                        "Bank credits — refunds, transfers and split settlements. " +
-                            "Not counted as income.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                }
-                items(received, key = { it.id }) { IncomeRow(it, earned = false) }
+                items(income, key = { it.id }) { IncomeRow(it) }
             }
         }
 
@@ -106,18 +90,9 @@ fun IncomeScreen(
 }
 
 @Composable
-private fun SectionHeading(text: String) {
-    Text(text, style = MaterialTheme.typography.titleMedium)
-}
-
-@Composable
-private fun IncomeRow(txn: Transaction, earned: Boolean) {
+private fun IncomeRow(txn: Transaction) {
     Card(
         Modifier.fillMaxWidth(),
-        colors = if (earned) CardDefaults.cardColors()
-                 else CardDefaults.cardColors(
-                     containerColor = MaterialTheme.colorScheme.surfaceVariant
-                 ),
     ) {
         Row(
             Modifier.fillMaxWidth().padding(16.dp),
@@ -135,8 +110,7 @@ private fun IncomeRow(txn: Transaction, earned: Boolean) {
                 "+₹" + txn.amount,
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.Medium,
-                color = if (earned) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = MaterialTheme.colorScheme.primary,
             )
         }
     }

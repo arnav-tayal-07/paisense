@@ -153,7 +153,6 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
                 // between accounts. Those are listed separately as "received".
                 2 -> IncomeScreen(
                     income = s.data.income,
-                    received = s.data.received,
                     onAdd = viewModel::addIncome,
                     modifier = content,
                 )

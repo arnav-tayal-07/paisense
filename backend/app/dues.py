@@ -132,30 +132,76 @@ def dues(conn: Connection) -> list[dict]:
 
         # The bank's own figure, if a recent card SMS carried one.
         reported = conn.execute(
-            """select reported_balance from transactions
+            """select reported_balance, txn_time from transactions
                where account_id = %s and reported_balance is not null
                order by txn_time desc limit 1""",
             (account["id"],),
         ).fetchone()
         available = reported["reported_balance"] if reported else None
 
-        # Prefer the bank's arithmetic: limit minus what's still available IS
-        # what you owe, and it needs no history at all. Deriving it from our
-        # own rows requires every purchase since the account opened, which we
-        # don't have — that produced a NEGATIVE outstanding, because the bill
-        # payments we recorded settled purchases from before the import window.
-        if account.get("credit_limit") is not None and available is not None:
-            outstanding = account["credit_limit"] - available
+        # `limit - available` is the bank's own arithmetic and needs no history,
+        # but it is a SNAPSHOT: true only at the moment that message arrived.
+        # Using it raw ignored a payment and a purchase that came afterwards.
+        # So take the snapshot and re-apply everything since.
+        snapshot_at = reported["txn_time"] if reported else None
+        since = conn.execute(
+            """select
+                 coalesce(sum(case when type = 'expense'      then amount else 0 end), 0) as spent,
+                 coalesce(sum(case when type = 'card_payment' then amount else 0 end), 0) as paid
+               from transactions
+               where account_id = %s and txn_time > %s
+                 and review_status in ('auto', 'confirmed')""",
+            (account["id"], snapshot_at),
+        ).fetchone() if snapshot_at else {"spent": 0, "paid": 0}
+
+        # Refuse rather than guess when the balance predates the limit.
+        limit_from = account.get("credit_limit_from")
+        stale_limit = (
+            limit_from is not None
+            and snapshot_at is not None
+            and snapshot_at.date() < limit_from
+        )
+
+        if stale_limit:
+            outstanding = None
+            reason = (
+                f"the most recent balance the bank sent is from "
+                f"{snapshot_at.date()}, before your credit limit changed on "
+                f"{limit_from} - the two can't be subtracted. It will resolve "
+                f"as soon as a new card message arrives."
+            )
+            basis = None
+        elif account.get("credit_limit") is not None and available is not None:
+            outstanding = (
+                account["credit_limit"] - available + since["spent"] - since["paid"]
+            )
+            # The snapshot is only comparable to TODAY'S limit if the limit
+            # hasn't moved since. Arnav's did — 20,000 on 27 August, 36,300
+            # from the 30th — and subtracting an old balance from a new limit
+            # overstated the debt by the size of the increase. We can't detect
+            # that yet (limit-change messages are ignored), so the basis is
+            # reported rather than hidden.
             reason = None
+            basis = {
+                "from_balance_at": snapshot_at.isoformat() if snapshot_at else None,
+                "spent_since": since["spent"],
+                "paid_since": since["paid"],
+                "caveat": (
+                    "assumes the credit limit has not changed since that balance "
+                    "was reported"
+                ),
+            }
         elif owed["owed"] >= 0:
             outstanding = owed["owed"]
             reason = None
+            basis = {"from_balance_at": None, "caveat": "derived from recorded rows only"}
         else:
             outstanding = None
             reason = (
                 "set the card's credit limit to compute this — our own history "
                 "starts mid-cycle, so bill payments exceed recorded purchases"
             )
+            basis = None
 
         out.append(
             {
@@ -167,6 +213,7 @@ def dues(conn: Connection) -> list[dict]:
                 "cycle_count": spend["count"],
                 "outstanding": outstanding,
                 "outstanding_unknown_reason": reason,
+                "outstanding_basis": basis,
                 # What the bank last said was left to spend.
                 "available_limit": available,
             }
