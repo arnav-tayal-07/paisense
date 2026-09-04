@@ -177,7 +177,7 @@ The learning cost is paid once per format.
 
 **Counterparty labels.** 107 of 139 transactions show a masked account number
 instead of a name, because RBL's UPI format never states a payee. Renaming
-works today but applies to ONE row; naming  should name every
+works today but applies to ONE row; naming `XX0233` should name every
 transaction with those digits, past and future. Small table, lookup at read
 time, and it is the single biggest readability win left.
 
@@ -187,7 +187,7 @@ Then, in rough order:
   would have caught. This is the largest piece of debt in the project.
 - **Import more history.** Only one month is loaded; the app supports 1/2/3.
 - **Notifications for card due dates** (7/3/1 days) - the reminder feature from
-  ADR 005, still unbuilt.  already supplies the dates.
+  ADR 005, still unbuilt. `GET /dues` already supplies the dates.
 - **Biometric gate** (ADR 007).
 - **Phase 4, the agent** - deliberately deferred until the app is solid.
 
