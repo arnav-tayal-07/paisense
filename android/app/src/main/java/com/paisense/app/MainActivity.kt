@@ -28,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.paisense.app.ui.HomeState
@@ -93,6 +94,18 @@ private val TABS = listOf(
 private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
     var tab by remember { mutableIntStateOf(0) }
     val state by viewModel.state.collectAsStateWithLifecycle()
+
+    // Refetch whenever the app comes back to the foreground.
+    //
+    // The ViewModel loads once when it is created and survives backgrounding,
+    // so without this the screen kept showing whatever was true when the app
+    // was first opened — indefinitely. New SMS arrive, the importer runs, the
+    // data changes on the server, and none of it appeared. A wrong total that
+    // looks confident is worse than a spinner.
+    LifecycleResumeEffect(Unit) {
+        viewModel.load()
+        onPauseOrDispose { }
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),

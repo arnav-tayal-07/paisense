@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.paisense.app.data.ReviewItem
 
@@ -33,6 +34,14 @@ fun ReviewScreen(
     modifier: Modifier = Modifier,
     viewModel: ReviewViewModel = viewModel(),
 ) {
+    // Same reason as the home screen: loaded once at creation, so a review
+    // queue emptied on another device — or filled by a new import — would
+    // never appear until the process was killed.
+    LifecycleResumeEffect(Unit) {
+        viewModel.load()
+        onPauseOrDispose { }
+    }
+
     val state by viewModel.state.collectAsStateWithLifecycle()
 
     when (val s = state) {

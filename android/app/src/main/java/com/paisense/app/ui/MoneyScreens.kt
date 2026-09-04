@@ -61,11 +61,21 @@ fun SummarySection(data: HomeData, modifier: Modifier = Modifier) {
                         HorizontalDivider(Modifier.padding(vertical = 12.dp))
                         Figure("Spent from accounts", summary.buckets.accountSpend.total)
                         Figure("Spent on cards", summary.buckets.cardSpend.total)
-                        Figure("Card bills paid", summary.buckets.cardPayment.total, muted = true)
+                        // No bill payments line. Paying a card bill is not
+                        // spending — it settles purchases already counted
+                        // above — and showing it next to two spending figures
+                        // invited exactly the arithmetic it must not join.
+                        //
+                        // Wallet spending is absent for a related reason: the
+                        // rupees left a bank account when the wallet was
+                        // topped up, and that debit is in "Spent from
+                        // accounts" already.
                         if (summary.buckets.unlinked.count > 0) {
-                            // Wallets and IPO blocks - real money, but tied to
-                            // no bank account, so neither category fits.
-                            Figure("Wallets & other", summary.buckets.unlinked.total, muted = true)
+                            // Spending whose account couldn't be identified.
+                            // Should be zero; shown when it isn't, because
+                            // money missing from both lines above would
+                            // otherwise be silently absent from the total.
+                            Figure("Unattributed", summary.buckets.unlinked.total, muted = true)
                         }
                         // No "Balance" line for now: income is manual and
                         // mostly unfilled, so a balance would just be a large
