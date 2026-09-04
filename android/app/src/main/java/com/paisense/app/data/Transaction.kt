@@ -69,8 +69,13 @@ data class Transaction(
             // not the whole screen.
             txnTime.take(10)
         }
-
-    private companion object {
-        val DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy")
-    }
 }
+
+// File-level, NOT a companion object inside Transaction.
+//
+// @Serializable generates its own Companion holding serializer(). Declaring
+// `private companion object` for a formatter made that generated companion
+// private too, and the app died on first use with:
+//   IllegalAccessError: Field 'Transaction.Companion' is inaccessible to Api
+// A @Serializable class should not declare a companion unless it needs one.
+private val DATE_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy")
