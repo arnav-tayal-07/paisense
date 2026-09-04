@@ -3,6 +3,7 @@ package com.paisense.app.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.paisense.app.data.Api
+import com.paisense.app.data.Summary
 import com.paisense.app.data.Transaction
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,7 +20,10 @@ import kotlinx.coroutines.launch
  */
 sealed interface TransactionsState {
     data object Loading : TransactionsState
-    data class Loaded(val transactions: List<Transaction>) : TransactionsState
+    data class Loaded(
+        val transactions: List<Transaction>,
+        val summary: Summary,
+    ) : TransactionsState
     data class Failed(val message: String) : TransactionsState
 }
 
@@ -38,7 +42,7 @@ class TransactionsViewModel : ViewModel() {
         // the phone mid-request doesn't leak the call or crash on return.
         viewModelScope.launch {
             _state.value = try {
-                TransactionsState.Loaded(Api.transactions())
+                TransactionsState.Loaded(Api.transactions(), Api.summary())
             } catch (e: Exception) {
                 // Surfaced verbatim: on a first run the useful failures are
                 // "no API key" and "server asleep", and a generic

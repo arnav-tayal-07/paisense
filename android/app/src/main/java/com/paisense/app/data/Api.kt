@@ -86,6 +86,9 @@ object Api {
     suspend fun transactions(limit: Int = 100): List<Transaction> =
         json.decodeFromString(get("/transactions?limit=$limit"))
 
+    /** Money split into income, card spending and account spending. */
+    suspend fun summary(): Summary = json.decodeFromString(get("/summary"))
+
     /** Transactions flagged for a human tick, with the SMS each came from. */
     suspend fun reviewQueue(): List<ReviewItem> =
         json.decodeFromString(get("/transactions/review"))

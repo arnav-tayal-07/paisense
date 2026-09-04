@@ -24,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.paisense.app.data.Summary
 import com.paisense.app.data.Transaction
 
 @Composable
@@ -66,9 +67,70 @@ fun TransactionsScreen(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    item { SummaryPanel(s.summary) }
                     items(s.transactions, key = { it.id }) { TransactionRow(it) }
                 }
             }
+    }
+}
+
+/**
+ * The three totals kept apart on purpose.
+ *
+ * Card spending is money owed but not yet paid; account spending is money
+ * already gone. A card bill payment is neither — the purchases it settles
+ * were counted when they happened — so it never joins the spending total
+ * (ADR 016). Unlinked is shown rather than hidden: leaving it out would make
+ * the totals quietly wrong.
+ */
+@Composable
+private fun SummaryPanel(summary: Summary) {
+    Card(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Column(Modifier.padding(16.dp)) {
+            Line("Income", summary.buckets.income, MaterialTheme.colorScheme.primary)
+            Line("Account spending (UPI)", summary.buckets.accountSpend, null)
+            Line("Credit card spending", summary.buckets.cardSpend, null)
+            if (summary.buckets.cardPayment.count > 0) {
+                Line("Card bills paid", summary.buckets.cardPayment, null, muted = true)
+            }
+            if (summary.buckets.unlinked.count > 0) {
+                Line("Unlinked", summary.buckets.unlinked, null, muted = true)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Line(
+    label: String,
+    bucket: com.paisense.app.data.Bucket,
+    accent: androidx.compose.ui.graphics.Color?,
+    muted: Boolean = false,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (muted) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                "${bucket.count} transactions",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            "₹" + bucket.total,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Medium,
+            color = accent ?: if (muted) MaterialTheme.colorScheme.onSurfaceVariant
+                              else MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 
