@@ -106,7 +106,7 @@ class HomeViewModel : ViewModel() {
      */
     private suspend fun fetch(): HomeData = coroutineScope {
         val summaryJob = async { runCatching { Api.summary() } }
-        val expensesJob = async { runCatching { Api.transactionsOfType("expense") } }
+        val expensesJob = async { runCatching { Api.bankExpenses() } }
         val incomeJob = async { runCatching { Api.transactionsOfType("income", source = "manual") } }
         val receivedJob = async { runCatching { Api.transactionsOfType("income", source = "sms") } }
         val cardSpendJob = async { runCatching { Api.cardSpends() } }

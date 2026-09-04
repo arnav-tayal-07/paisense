@@ -31,6 +31,59 @@ returning *
 
 _SELECT_BY_DEDUPE_KEY = "select * from transactions where dedupe_key = %s"
 
+# Re-reading a message produces the same dedupe_key, so the insert above hits
+# ON CONFLICT DO NOTHING and the stored row survives — wrong values and all.
+# That made every parser fix retroactively useless: an SBI credit filed as a
+# ₹28,345 expense stayed an expense no matter how many times it was re-read,
+# because the corrected extraction was silently discarded.
+#
+# Only the machine-derived fields are overwritten. `category` and `note` are
+# absent on purpose: nothing but the user ever writes them, so a re-parse must
+# not touch them. `merchant` IS overwritten, but the whole statement skips any
+# row the user confirmed — once they have looked at a transaction and named
+# it, a model does not get to rewrite it.
+_REPARSE = """
+update transactions set
+  type             = %s,
+  amount           = %s,
+  merchant         = %s,
+  txn_time         = coalesce(%s, txn_time),
+  upi_ref          = %s,
+  payment_method   = %s,
+  account_id       = %s,
+  account_last4    = %s,
+  reported_balance = %s,
+  counterparty     = %s
+where id = %s
+  and source = 'sms'
+  and review_status <> 'confirmed'
+returning *
+"""
+
+
+def apply_reparse(conn: Connection, txn_id: int, txn: TransactionIn) -> dict | None:
+    """Overwrite a stored transaction with a fresh reading of its message.
+
+    Returns the updated row, or None when the row was left alone — either the
+    user confirmed it, or it wasn't from an SMS in the first place.
+    """
+    return conn.execute(
+        _REPARSE,
+        (
+            txn.type,
+            txn.amount,
+            txn.merchant,
+            txn.txn_time,
+            txn.upi_ref,
+            txn.payment_method,
+            txn.account_id,
+            txn.account_last4,
+            txn.reported_balance,
+            txn.counterparty,
+            txn_id,
+        ),
+    ).fetchone()
+
 
 def create_transaction(conn: Connection, txn: TransactionIn) -> tuple[dict, bool]:
     """Insert a transaction. Returns (row, created).
@@ -253,6 +306,10 @@ select
     when t.type = 'card_payment' then 'card_payment'
     when a.kind = 'credit_card'  then 'card_spend'
     when a.kind = 'bank_account' then 'account_spend'
+    -- Amazon Pay balance, Swiggy Money. Real purchases, but the rupees left
+    -- a bank account when the wallet was topped up and that debit is already
+    -- counted. Adding this would charge the same money twice.
+    when a.kind = 'wallet'       then 'wallet_spend'
     else 'unlinked'
   end as bucket,
   count(*) as count,
@@ -276,6 +333,10 @@ def summary(conn: Connection, start=None, end=None) -> dict:
     - `account_spend` is UPI and bank debits — money already gone.
     - `card_payment` is settling a card bill. Counting it as spending would
       double-count every purchase it settles (ADR 016), so it stands alone.
+    - `wallet_spend` is Amazon Pay or Swiggy Money. Excluded from the total
+      for the same reason as a card bill payment: the money left a bank
+      account when the wallet was topped up, and that debit was already
+      counted. Reported so it isn't invisible, never added.
     - `unlinked` is spending whose account couldn't be identified. Shown
       rather than hidden: silently dropping it would make the totals wrong
       in a way nothing announces.
@@ -288,7 +349,8 @@ def summary(conn: Connection, start=None, end=None) -> dict:
     # type gets the other the moment a bucket happens to be empty. That is
     # exactly what broke the app the first day someone had no manual income.
     for key in ("income", "received", "card_spend", "account_spend",
-                "card_payment", "card_payment_mirror", "blocked", "unlinked"):
+                "card_payment", "card_payment_mirror", "blocked", "wallet_spend",
+                "unlinked"):
         buckets.setdefault(key, {"count": 0, "total": Decimal("0")})
 
     spent = buckets["card_spend"]["total"] + buckets["account_spend"]["total"]

@@ -148,6 +148,20 @@ object Api {
     }
 
     /**
+     * Money that actually left a bank account.
+     *
+     * Not card purchases — those are on the Card tab, and showing them here
+     * too listed the same spend in two places. Not wallet spends either:
+     * paying with Amazon Pay balance or Swiggy Money moves nothing out of an
+     * account, because the rupees left when the wallet was topped up and that
+     * debit is already in this list.
+     */
+    suspend fun bankExpenses(limit: Int = 200): List<Transaction> =
+        json.decodeFromString(
+            get("/transactions?type=expense&account_kind=bank_account&limit=$limit")
+        )
+
+    /**
      * Purchases made ON a credit card — not bill payments.
      *
      * The Card tab was showing bill payments, which is what you PAID rather

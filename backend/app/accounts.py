@@ -46,7 +46,7 @@ def resolve_account_id(
         -> None, because guessing would silently corrupt a card's totals
     """
     if not last4:
-        return None
+        return _by_issuer_alone(conn, sender, kind)
 
     # A bank can issue a credit card and a savings account whose digits
     # collide. When the pattern knows which kind of message it read, that
@@ -70,6 +70,32 @@ def resolve_account_id(
         return rows[0]["id"]
 
     return None
+
+
+def _by_issuer_alone(conn: Connection, sender: str, kind: str | None) -> int | None:
+    """The account for a sender that named no digits, if there is exactly one.
+
+    Plenty of real messages never state an account number. RBL's "Your account
+    has been debited towards SPOTIFY" names none, and a wallet has none to
+    name — Amazon Pay is a balance, not a card. Returning None for all of them
+    left genuine spending permanently unattributed.
+
+    The sender header is enough on its own WHEN it maps to a single account.
+    If an issuer has both a card and a savings account registered, this
+    abstains rather than guessing, same as the digit path: a wrong link
+    silently corrupts an account's totals, an unlinked row is visible.
+    """
+    if not sender:
+        return None
+
+    rows = conn.execute(
+        """select id from accounts
+           where issuer_code is not null
+             and upper(%s) like '%%' || upper(issuer_code) || '%%'
+             and (%s::text is null or kind = %s)""",
+        (sender, kind, kind),
+    ).fetchall()
+    return rows[0]["id"] if len(rows) == 1 else None
 
 
 _UNLINKED = """

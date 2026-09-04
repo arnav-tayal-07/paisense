@@ -16,7 +16,7 @@ from .db import get_conn
 from .models import SmsIn, TransactionIn
 from .patterns import match_message
 from .sms import IST, build_dedupe_key, extract
-from .transactions import create_transaction
+from .transactions import apply_reparse, create_transaction
 
 # ON CONFLICT DO NOTHING against (sender, body, sms_sent_at): the phone
 # re-uploads its inbox on every open, so the same message arrives repeatedly.
@@ -128,7 +128,14 @@ def process_raw(raw: dict) -> dict:
         # created=False means dedupe_key already existed — a message that
         # produced this transaction before. Still link the raw row to it, so
         # every copy of the message points at the transaction it describes.
-        row, _created = create_transaction(conn, txn)
+        row, created = create_transaction(conn, txn)
+
+        # We only reach here on a first read or a deliberate retry, so an
+        # existing row means the stored version came from a reading we had
+        # reason to distrust. Overwrite it, or the correction is thrown away
+        # and the parser fix helps only messages that arrive later.
+        if not created:
+            row = apply_reparse(conn, row["id"], txn) or row
 
         # Money that belongs to a account we can't identify won't appear in any
         # per-account total, and nothing else would ever mention it.

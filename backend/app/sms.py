@@ -420,6 +420,17 @@ def extract(
 
     last4 = data.get("account_last4") or None
 
+    # Same guardrail as the amount, for the same reason: the model invented
+    # '7489' for an SBI message that names account X1614, and those four
+    # digits happened to match a registered RBL account. The transaction was
+    # then filed under the wrong bank — silently, because a linked
+    # transaction looks healthier than an unlinked one.
+    #
+    # Digits that aren't in the message can't identify anything, so drop them
+    # and let the row stay unlinked, which is visible and fixable.
+    if last4 and last4 not in body.replace(" ", ""):
+        last4 = None
+
     reported_balance = None
     if data.get("reported_balance"):
         try:
