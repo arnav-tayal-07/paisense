@@ -162,6 +162,7 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
                 // PAID rather than what was SPENT.
                 else -> CardSection(
                     dues = s.data.dues,
+                    onSetLimit = viewModel::setCreditLimit,
                     spends = s.data.cardSpends,
                     payments = s.data.cardPayments,
                     modifier = content,

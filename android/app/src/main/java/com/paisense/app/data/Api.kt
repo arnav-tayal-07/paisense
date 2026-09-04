@@ -158,6 +158,18 @@ object Api {
             get("/transactions?type=expense&account_kind=credit_card&limit=$limit")
         )
 
+    /**
+     * Set a card's credit limit.
+     *
+     * The one figure nothing else can supply: it is not in any transaction,
+     * and reading it from limit-change messages proved unreliable — a stale
+     * limit silently produces a wrong "available".
+     */
+    suspend fun setCreditLimit(accountId: Long, limit: String) {
+        val body = buildJsonObject { put("credit_limit", JsonPrimitive(limit)) }
+        patch("/accounts/$accountId", json.encodeToString(JsonObject.serializer(), body))
+    }
+
     /** Next payment date and amount for every credit card. */
     suspend fun dues(): List<Due> = json.decodeFromString(get("/dues"))
 

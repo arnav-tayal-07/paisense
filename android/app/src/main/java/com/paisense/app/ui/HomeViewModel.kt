@@ -82,6 +82,14 @@ class HomeViewModel : ViewModel() {
         }
     }
 
+    /** Set a card's credit limit, then reload so "available" recomputes. */
+    fun setCreditLimit(accountId: Long, limit: String) {
+        viewModelScope.launch {
+            runCatching { Api.setCreditLimit(accountId, limit) }
+            load()
+        }
+    }
+
     /** Add income by hand, then reload. */
     fun addIncome(amount: String, source: String, date: String) {
         viewModelScope.launch {

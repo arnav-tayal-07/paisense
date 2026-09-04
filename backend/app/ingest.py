@@ -148,42 +148,23 @@ def process_raw(raw: dict) -> dict:
 
 
 def _apply_credit_limit(conn, raw: dict, result) -> None:
-    """Record a new credit limit the bank announced.
+    """Deliberately does nothing. Kept as the record of why.
 
-    A limit notice is not a transaction, but it carries the only figure
-    `outstanding` can be derived from. Without this the limit is a number
-    somebody typed in once, which goes quietly stale the next time the bank
-    revises it — and a stale limit silently produces a wrong debt.
+    This used to write `accounts.credit_limit` from limit-change SMS, so the
+    limit would track the bank automatically. It produced a wrong "available"
+    that took three attempts to diagnose: a limit revised on 30 Aug was being
+    measured against spending from 27 Aug, and because the overwrite was
+    silent there was nothing to see.
 
-    Only ever moves the limit forward in time, so a message arriving out of
-    order, or replayed during a re-import, cannot overwrite a newer limit
-    with an older one.
+    The limit is now the user's to set and only theirs — one number, typed
+    once, visible on the card, changed only when they change it. An automatic
+    update that is right most of the time is worse than a manual one that is
+    always inspectable, because nobody checks a number they didn't touch.
+
+    The limit is still EXTRACTED (sms.py) and stored on the raw message, so
+    the history is there if this is ever revisited.
     """
-    if not result.new_credit_limit or not result.account_last4:
-        return
-
-    account_id = resolve_account_id(
-        conn, raw["sender"], result.account_last4, "credit_card"
-    )
-    if account_id is None:
-        return
-
-    try:
-        amount = Decimal(str(result.new_credit_limit).replace(",", "").strip())
-    except (InvalidOperation, ValueError):
-        return
-
-    effective = result.credit_limit_effective
-    conn.execute(
-        """update accounts
-           set credit_limit = %s,
-               credit_limit_from = coalesce(%s::date, credit_limit_from)
-           where id = %s
-             and (credit_limit_from is null
-                  or %s::date is null
-                  or %s::date >= credit_limit_from)""",
-        (amount, effective, account_id, effective, effective),
-    )
+    return
 
 
 def _drop_orphan(conn, previous_id, new_id) -> None:
