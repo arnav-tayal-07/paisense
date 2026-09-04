@@ -14,6 +14,7 @@ from psycopg.errors import ForeignKeyViolation
 
 from .auth import require_api_key
 from .db import get_conn
+from .dues import dues as card_dues
 from .serialize import out
 from .accounts import (
     add_account_number,
@@ -197,6 +198,19 @@ def get_patterns():
     """
     with get_conn() as conn:
         return out(pattern_stats(conn))
+
+
+@app.get("/dues")
+def get_dues():
+    """Next payment date and amount for every credit card.
+
+    Two different numbers, deliberately both shown: `outstanding` is every
+    purchase minus every bill payment - what you owe right now. `cycle_spend`
+    is only what has landed since the last statement, which is what the NEXT
+    bill will ask for. Confusing them is how people underpay.
+    """
+    with get_conn() as conn:
+        return out(card_dues(conn))
 
 
 @app.get("/summary")

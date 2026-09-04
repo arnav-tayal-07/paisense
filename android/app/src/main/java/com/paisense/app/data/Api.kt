@@ -86,6 +86,13 @@ object Api {
     suspend fun transactions(limit: Int = 100): List<Transaction> =
         json.decodeFromString(get("/transactions?limit=$limit"))
 
+    /** Next payment date and amount for every credit card. */
+    suspend fun dues(): List<Due> = json.decodeFromString(get("/dues"))
+
+    /** Transactions of one type only - income, expense or card_payment. */
+    suspend fun transactionsOfType(type: String, limit: Int = 200): List<Transaction> =
+        json.decodeFromString(get("/transactions?type=$type&limit=$limit"))
+
     /** Money split into income, card spending and account spending. */
     suspend fun summary(): Summary = json.decodeFromString(get("/summary"))
 

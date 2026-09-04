@@ -5,9 +5,14 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
@@ -19,11 +24,18 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.paisense.app.ui.HomeState
+import com.paisense.app.ui.HomeViewModel
+import com.paisense.app.ui.LedgerSection
 import com.paisense.app.ui.OnboardingScreen
 import com.paisense.app.ui.ReviewScreen
-import com.paisense.app.ui.TransactionsScreen
+import com.paisense.app.ui.SummarySection
 import com.paisense.app.ui.hasSmsPermission
 import com.paisense.app.ui.theme.PaiSenseTheme
 
@@ -43,9 +55,9 @@ private fun App() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
 
-    // Onboarding is shown once. Also re-shown if the permission was granted
-    // and later revoked in Android settings, since without it the app quietly
-    // stops recording anything and would otherwise never say so.
+    // Onboarding is shown once, and again if the permission was later revoked
+    // in Android settings — without it the app quietly stops recording and
+    // would otherwise never say so.
     var onboarded by remember {
         mutableStateOf(prefs.getBoolean(KEY_ONBOARDED, false) && hasSmsPermission(context))
     }
@@ -60,36 +72,87 @@ private fun App() {
     }
 }
 
+private data class Tab(val label: String, val glyph: String)
+
+// Income, expenses and card kept as separate destinations rather than one
+// mixed list — the same split the earlier Kharcha ledger used, because
+// "what came in", "what went out" and "what I owe" are three different
+// questions and merging them answers none of them well.
+private val TABS = listOf(
+    Tab("Summary", "₹"),
+    Tab("Expenses", "−"),
+    Tab("Income", "+"),
+    Tab("Card", "▭"),
+    Tab("Review", "✓"),
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MainScaffold() {
+private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
     var tab by remember { mutableIntStateOf(0) }
+    val state by viewModel.state.collectAsStateWithLifecycle()
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        topBar = { TopAppBar(title = { Text(if (tab == 0) "PaiSense" else "Review") }) },
+        topBar = { TopAppBar(title = { Text(TABS[tab].label) }) },
         bottomBar = {
             NavigationBar {
-                NavigationBarItem(
-                    selected = tab == 0,
-                    onClick = { tab = 0 },
-                    // Text rather than a Material icon: the icons artifact is a
-                    // separate dependency, and two glyphs do not justify it.
-                    icon = { Text("₹") },
-                    label = { Text("Spending") },
-                )
-                NavigationBarItem(
-                    selected = tab == 1,
-                    onClick = { tab = 1 },
-                    icon = { Text("✓") },
-                    label = { Text("Review") },
-                )
+                TABS.forEachIndexed { index, t ->
+                    NavigationBarItem(
+                        selected = tab == index,
+                        onClick = { tab = index },
+                        // Text glyphs rather than Material icons: five symbols
+                        // don't justify another dependency.
+                        icon = { Text(t.glyph) },
+                        label = { Text(t.label) },
+                    )
+                }
             }
         },
-    ) { innerPadding ->
-        when (tab) {
-            0 -> TransactionsScreen(modifier = Modifier.padding(innerPadding))
-            else -> ReviewScreen(modifier = Modifier.padding(innerPadding))
+    ) { padding ->
+        val content = Modifier.padding(padding)
+
+        if (tab == 4) {
+            ReviewScreen(modifier = content)
+            return@Scaffold
+        }
+
+        when (val s = state) {
+            is HomeState.Loading -> Centered(content) {
+                CircularProgressIndicator()
+                Text(
+                    "Waking the server…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 16.dp),
+                )
+            }
+
+            is HomeState.Failed -> Centered(content) {
+                Text("Couldn't load", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    s.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(vertical = 12.dp),
+                )
+                Button(onClick = viewModel::load) { Text("Try again") }
+            }
+
+            is HomeState.Loaded -> when (tab) {
+                0 -> SummarySection(s.data, content)
+                1 -> LedgerSection(s.data.expenses, "No spending recorded", content)
+                2 -> LedgerSection(s.data.income, "No income recorded", content)
+                else -> LedgerSection(s.data.cardPayments, "No card bill payments", content)
+            }
         }
     }
+}
+
+@Composable
+private fun Centered(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Column(
+        modifier = modifier.fillMaxSize().padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) { content() }
 }
