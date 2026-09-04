@@ -14,6 +14,7 @@ from psycopg.errors import ForeignKeyViolation
 
 from .auth import require_api_key
 from .db import get_conn
+from .serialize import out
 from .accounts import (
     add_account_number,
     create_account,
@@ -77,7 +78,7 @@ def post_transaction(txn: TransactionIn, response: Response):
         )
 
     response.status_code = 201 if created else 200
-    return row
+    return out(row)
 
 
 @app.post("/sms")
@@ -93,7 +94,7 @@ def post_sms(sms: SmsIn):
       ignored - an OTP or marketing message, correctly skipped
       failed  - should have parsed and didn't; parse_error says why
     """
-    return ingest(sms)
+    return out(ingest(sms))
 
 
 @app.post("/sms/batch")
@@ -108,7 +109,7 @@ def post_sms_batch(messages: list[SmsIn]):
     unique constraint, which matters because someone unsure whether it worked
     will press the button again.
     """
-    return store_batch(messages)
+    return out(store_batch(messages))
 
 
 @app.get("/sms/import/status")
@@ -117,7 +118,7 @@ def get_import_status():
 
     Drives the app's progress line: "312 of 412 processed".
     """
-    return import_status()
+    return out(import_status())
 
 
 @app.post("/sms/import/run")
@@ -135,7 +136,7 @@ def post_import_run(
     Safe to call repeatedly - whatever is left stays pending and is picked up
     next time, which is how an import survives running out of quota.
     """
-    return run_import(budget=budget, seed_per_round=seed_per_round)
+    return out(run_import(budget=budget, seed_per_round=seed_per_round))
 
 
 @app.get("/sms/unparsed")
@@ -145,7 +146,7 @@ def get_unparsed_sms(limit: int = Query(default=50, ge=1, le=200)):
     This is the alarm for a bank changing its message format. Correctly
     ignored OTPs are excluded; including them would bury the signal.
     """
-    return list_unparsed(limit)
+    return out(list_unparsed(limit))
 
 
 @app.post("/sms/reprocess")
@@ -156,7 +157,7 @@ def post_reprocess_sms(limit: int = Query(default=50, ge=1, le=200)):
     linked to. Replay is only safe because dedupe_key makes re-inserting an
     existing transaction a no-op.
     """
-    return reprocess_failed(limit)
+    return out(reprocess_failed(limit))
 
 
 @app.get("/sms/ignored")
@@ -167,7 +168,7 @@ def get_ignored_sms(limit: int = Query(default=50, ge=1, le=200)):
     here because this is the one place a wrongly-dropped spend could hide.
     An ignored row is in no other list and is never retried.
     """
-    return list_ignored(limit)
+    return out(list_ignored(limit))
 
 
 @app.post("/sms/patterns/{sender_code}")
@@ -182,7 +183,7 @@ def post_generate_pattern(sender_code: str, samples: int = Query(default=8, ge=2
     After this, messages in that format cost nothing to parse.
     """
     with get_conn() as conn:
-        return generate_pattern(conn, sender_code, limit=samples)
+        return out(generate_pattern(conn, sender_code, limit=samples))
 
 
 @app.get("/sms/patterns")
@@ -193,7 +194,7 @@ def get_patterns():
     which is the trigger to regenerate, rather than doing it on a calendar.
     """
     with get_conn() as conn:
-        return pattern_stats(conn)
+        return out(pattern_stats(conn))
 
 
 @app.get("/transactions/review")
@@ -206,7 +207,7 @@ def get_review_queue(limit: int = Query(default=50, ge=1, le=200)):
     scroll past without reading is worse than no queue.
     """
     with get_conn() as conn:
-        return list_for_review(conn, limit)
+        return out(list_for_review(conn, limit))
 
 
 @app.post("/transactions/{txn_id}/confirm")
@@ -216,7 +217,7 @@ def post_confirm_transaction(txn_id: int):
         row = set_review(conn, txn_id, "confirmed")
     if row is None:
         raise HTTPException(status_code=404, detail=f"No transaction {txn_id} awaiting review")
-    return row
+    return out(row)
 
 
 @app.post("/transactions/{txn_id}/reject")
@@ -234,7 +235,7 @@ def post_reject_transaction(txn_id: int):
         row = set_review(conn, txn_id, "rejected")
     if row is None:
         raise HTTPException(status_code=404, detail=f"No transaction {txn_id} awaiting review")
-    return row
+    return out(row)
 
 
 @app.patch("/transactions/{txn_id}")
@@ -257,7 +258,7 @@ def patch_transaction(txn_id: int, changes: TransactionPatch):
 
     if row is None:
         raise HTTPException(status_code=404, detail=f"No transaction with id {txn_id}")
-    return row
+    return out(row)
 
 
 @app.post("/accounts", status_code=201)
@@ -269,7 +270,7 @@ def post_account(account: AccountIn):
     a RuPay sharing a single limit (ADR 020, 026).
     """
     with get_conn() as conn:
-        return create_account(
+        return out(create_account(
             conn,
             name=account.name,
             kind=account.kind,
@@ -278,14 +279,14 @@ def post_account(account: AccountIn):
             due_days_after=account.due_days_after,
             credit_limit=account.credit_limit,
             due_day=account.due_day,
-        )
+        ))
 
 
 @app.get("/accounts")
 def get_accounts():
     """All accounts, each with its physical cards nested."""
     with get_conn() as conn:
-        return list_accounts(conn)
+        return out(list_accounts(conn))
 
 
 @app.patch("/accounts/{account_id}")
@@ -298,8 +299,8 @@ def patch_account(account_id: int, changes: AccountPatch):
     with get_conn() as conn:
         row = update_account(conn, account_id, changes.model_dump(exclude_unset=True))
     if row is None:
-        raise HTTPException(status_code=404, detail=f"No card with id {account_id}")
-    return row
+        raise HTTPException(status_code=404, detail=f"No account with id {account_id}")
+    return out(row)
 
 
 @app.post("/accounts/{account_id}/numbers", status_code=201)
@@ -314,7 +315,7 @@ def post_account_number(account_id: int, number: AccountNumberIn):
                 status_code=409,
                 detail=f"{number.last4} is already on card {account_id}",
             )
-        return row
+        return out(row)
 
 
 @app.patch("/accounts/{account_id}/numbers/{last4}")
@@ -328,7 +329,7 @@ def patch_account_number(account_id: int, last4: str, is_active: bool):
         row = set_number_active(conn, account_id, last4, is_active)
     if row is None:
         raise HTTPException(status_code=404, detail=f"{last4} is not on card {account_id}")
-    return row
+    return out(row)
 
 
 @app.get("/accounts/{account_id}/reconcile")
@@ -341,7 +342,7 @@ def get_account_reconciliation(account_id: int):
     MISSING message — everything else can only inspect ones that arrived.
     """
     with get_conn() as conn:
-        return reconcile_account(conn, account_id)
+        return out(reconcile_account(conn, account_id))
 
 
 @app.get("/transactions")
@@ -372,7 +373,7 @@ def get_transactions(
       ?merchant=zom                                  -> anything Zomato-ish
     """
     with get_conn() as conn:
-        return list_transactions(
+        return out(list_transactions(
             conn,
             limit,
             txn_type=txn_type,
@@ -382,7 +383,7 @@ def get_transactions(
             start=start,
             end=end,
             countable_only=not include_unreviewed,
-        )
+        ))
 
 
 @app.get("/transactions/{txn_id}")
@@ -393,7 +394,7 @@ def get_transaction_by_id(txn_id: int):
 
     if row is None:
         raise HTTPException(status_code=404, detail=f"No transaction with id {txn_id}")
-    return row
+    return out(row)
 
 
 @app.delete("/transactions/{txn_id}", status_code=204)
