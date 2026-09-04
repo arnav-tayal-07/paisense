@@ -1,7 +1,7 @@
 # Session handoff — continue here
 
 > **For any AI assistant picking this project up: read this file, then [decisions.md](decisions.md), before doing anything.**
-> Last updated: 2026-09-02. **Backend complete, deployed and locked.** Next: the Android app (native Kotlin, ADR 027).
+> Last updated: 2026-09-04. **Backend deployed, Android app built and running on real data.** 149 transactions imported from Arnav's actual bank SMS.
 
 ## The one rule that overrides everything
 
@@ -15,24 +15,68 @@
 
 | Item | Status |
 |---|---|
-| Decisions | OK [decisions.md](decisions.md), ADR 001-031 |
+| Decisions | OK [decisions.md](decisions.md), ADR 001-031. Sessions since are recorded in the git log |
 | Repo | OK https://github.com/arnav-tayal-07/paisense (**public**) |
 | **Live API** | OK **https://paisense.onrender.com** - auto-deploys on push to `main` |
 | **API key** | OK every route except `/health` and `/docs` needs `X-API-Key` |
-| Supabase | OK Mumbai, 5 tables, 9 migrations, RLS on everything |
+| Supabase | OK Mumbai, 5 tables, 11 migrations, RLS on everything |
 | Keepalive | OK GitHub Action pings `/health` daily; secret set, run verified green |
 | Transactions API | OK full CRUD + filtering + review queue + reconciliation |
 | Accounts API | OK credit cards and bank accounts, several numbers per account |
 | SMS ingestion | OK LLM extraction, self-written regex patterns, replay on failure |
 | Bulk import | OK store-many plus a budgeted queue worker |
-| Android app | TODO **next** - Studio installed (Quail 4), project not yet created |
+| Android app | OK **built and installed** - 5 tabs, SMS import, review, editing |
 | Agent | TODO deferred until after the app |
-| Automated tests | TODO none. Has bitten us four times |
+| Automated tests | TODO none. Has now bitten us EIGHT times |
 
 **Local dev:** `cd backend` then `.\.venv\Scripts\uvicorn.exe app.main:app --reload`.
 Requests need the key: header `X-API-Key`, value from `backend\.env`.
 
-## Where the code lives
+## The Android app (native Kotlin + Compose)
+
+Lives in `android/`, package `com.paisense.app`, min SDK 26. Build and install:
+
+```
+cd android
+./gradlew.bat installDebug          # needs USB debugging on
+```
+
+Gradle needs Android Studio's bundled JDK, not the system one:
+`JAVA_HOME="/c/Program Files/Android/Android Studio/jbr"`.
+
+**Five tabs**: Summary, Expenses, Income, Card, Review.
+
+| File | Holds |
+|---|---|
+| `MainActivity.kt` | tab scaffold, onboarding gate |
+| `ui/OnboardingScreen.kt` + `OnboardingViewModel.kt` | permission, 1/2/3-month import |
+| `ui/HomeViewModel.kt` | all six fetches, each independently caught |
+| `ui/MoneyScreens.kt` | Summary panel, Card section, ledger lists |
+| `ui/IncomeScreen.kt` | manual income entry only |
+| `ui/EditDialog.kt` | rename any transaction |
+| `ui/ReviewScreen.kt` | tick / cross queue |
+| `work/ImportWorker.kt` | the import, in WorkManager with a notification |
+| `data/` | Api, SmsReader, models |
+
+**Things that are the way they are for a reason:**
+
+- **Money is a String all the way through.** JSON has no decimal type; parsing to Double reintroduces exactly what `numeric(12,2)` avoids. An empty bucket defaulting to int `0` instead of `"0"` crashed the app — same boundary, third time.
+- **Every fetch fails independently.** One bad endpoint used to blank the whole app.
+- **`SmsReader` filters on device**: DLT-shaped sender AND the body must mention money. On a real inbox that was 293 messages → 184, and 95 senders → 33. Senders matter more: one with a single message can never yield a pattern.
+- **A verb filter was tried and reverted** — it dropped real transactions phrased "Dr. from A/C" and "Thank you for payment of INR". The phone only skips what obviously isn't a transaction; deciding what one IS belongs to the model.
+- **Import runs in WorkManager**, not a ViewModel. It was in `viewModelScope` first, so leaving the screen silently killed it while the button said "continue in background".
+
+## Real data currently in the database
+
+149 transactions, 184 raw messages, from Arnav's actual banks (RBL 7489, BOB 1614, IDFC card 7714 + 3577). One month imported.
+
+```
+Account spending (UPI)  ~104   Card spending  6   Card bills  3
+Income (manual)            0   Wallets/other  11
+```
+
+## Where the code lives (backend)
+
 
 | File | Holds |
 |---|---|
@@ -131,24 +175,21 @@ The learning cost is paid once per format.
 
 ## The exact next step
 
-**The Android app - native Kotlin, not React Native.** ADR 027 supersedes ADR 002: iOS cannot read SMS at all, so React Native's cross-platform benefit could never be collected, and a native BroadcastReceiver fires when the app is closed where an RN bridge does not.
+**Counterparty labels.** 107 of 139 transactions show a masked account number
+instead of a name, because RBL's UPI format never states a payee. Renaming
+works today but applies to ONE row; naming  should name every
+transaction with those digits, past and future. Small table, lookup at read
+time, and it is the single biggest readability win left.
 
-Android Studio **Quail 4 is installed**; the project is not yet created. Wizard settings agreed:
+Then, in rough order:
 
-| Field | Value |
-|---|---|
-| Template | Empty Activity (Compose) |
-| Name | PaiSense |
-| Package | com.paisense.app |
-| Location | C:\projects\paisense\android |
-| Minimum SDK | API 26 |
-| Build config | Kotlin DSL |
-
-**Build order agreed:** first a screen listing real transactions from the live API - proves Kotlin, Compose, networking and the API together, with no SMS involved. Then the BroadcastReceiver and the outbox. Then review cards, due-date notifications, biometric gate.
-
-**The app needs its own outbox.** `raw_sms` guarantees nothing is lost *once the server has it*. Between phone and server there is no such guarantee, and Render's free tier sleeps - so a forwarded message can hit a cold start and time out. Hold each message locally and mark it sent only on acknowledgement. `WorkManager` is the right tool. Same reasoning as ADR 018, one layer up.
-
-**Enable USB debugging first:** Settings -> About phone -> tap Build number seven times, then Developer options -> USB debugging.
+- **Automated tests.** Eight incidents now, several of which a five-line test
+  would have caught. This is the largest piece of debt in the project.
+- **Import more history.** Only one month is loaded; the app supports 1/2/3.
+- **Notifications for card due dates** (7/3/1 days) - the reminder feature from
+  ADR 005, still unbuilt.  already supplies the dates.
+- **Biometric gate** (ADR 007).
+- **Phase 4, the agent** - deliberately deferred until the app is solid.
 
 ## Deploy notes
 
@@ -160,13 +201,31 @@ Render reads settings from its dashboard, **not** from `render.yaml` — that fi
 
 Free tier sleeps after 15 min idle, ~50s to wake. Supabase separately **pauses a free project after 7 days idle** and needs a manual click to restore — that is the failure worth preventing, and what the daily keepalive is for.
 
+## Bugs found by using it on real data — read before changing these
+
+Every one came from Arnav using the app, and none would have surfaced from testing.
+
+1. **Card bills counted twice.** A payment produces two messages: the bank says money left, the card says money arrived. `card_payment_mirror` marks the card side; only the bank side counts.
+2. **IPO blocks counted as spending.** "Rs.14938 is blocked in your A/C" is money held, not spent. The extractor now refuses blocked-funds messages entirely — if allotted, the bank sends its own debit.
+3. **The due date showed the wrong bill.** It reported the cycle still accumulating (8 Oct) while the bill actually owed was 8 Sept, four days away. `cycle_for` now returns both, and `due_date` is the one owed.
+4. **Outstanding was a stale snapshot.** `limit - available` is only true at the instant the bank sent it; transactions since must be re-applied.
+5. **Outstanding compared different limits.** His limit went 20,000 → 36,300 on 30 Aug while the newest balance was from the 27th, overstating debt by 16,300. `accounts.credit_limit_from` makes the calculation REFUSE rather than answer wrongly.
+6. **Duplicates from multiple DLT headers.** Banks send the same alert from several senders. A reference now keys alone (`ref:...`); the derived key uses the issuer segment, not the full header.
+7. **Orphans from a key-format change.** Re-parsing created a new row and repointed the message, leaving the old one behind as a phantom. `_drop_orphan` cleans up.
+8. **HTTP 422** — the app pulled every expense with `limit=500` to filter locally, over the 200 cap. Filtering moved to the server: `?account_kind=credit_card`.
+9. **Bank credits are not income.** Refunds, split settlements, his own transfers. Income is manual-entry only now; the "received" section was removed from the UI entirely at his request.
+
+## Known limitations, not bugs
+
+- **107 of 139 transactions have no payee name** because RBL's UPI format says "credited to a/c XX0233" and stops. No prompt can extract what isn't there. Tapping a row renames it; a per-counterparty label that applies to all matching rows is the proper fix and is NOT built.
+- **Only one month is imported.** Older spending isn't in the database. Re-run import from onboarding for 2 or 3 months.
+- **`outstanding` currently refuses to compute** for the IDFC card, correctly — the newest balance predates the limit change. It resolves itself as soon as a new card message arrives, now that limit notices are read automatically.
+
 ## Carried debt
 
-- **No automated tests.** Four separate incidents so far: a renamed column that passed locally and 500'd in production; a timezone comparison that failed every valid pattern; eleven duplicate patterns from a missing retire step; and two banks silently learning nothing. Every one would have been caught in seconds.
-- **Registering an account does not retroactively link earlier transactions.** They stay flagged "account ending NNNN is not registered" until confirmed by hand. A re-resolve pass would fix it.
-- `POST /transactions` shows "Undocumented" beside its 201.
-- **Money over JSON**: `120.50` serialises to `120.5`. Serialise as a string before the app parses it as a float.
-- **Negative pattern validation only sees formats present in the same generation batch.** A format the bank has not sent recently is not checked against.
+- **Still no automated tests.** Now eight separate incidents.
+- Counterparty labels not built.
+- The agent (Phase 4) is still deferred.
 
 ## Schema state - settled, don't revisit
 
