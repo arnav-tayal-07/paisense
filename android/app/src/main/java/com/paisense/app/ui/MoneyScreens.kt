@@ -205,7 +205,16 @@ private fun DueCard(due: Due) {
             }
 
             due.creditLimit?.let { Figure("Credit limit", it, muted = true) }
-            due.availableLimit?.let { Figure("Available now", it, muted = true) }
+            // Dated on purpose. This is the last figure the BANK sent, which
+            // may be days old — labelling it "now" made a 27 August balance
+            // look like today's.
+            due.availableLimit?.let {
+                Figure(
+                    "Available (as of ${due.availableLimitAt?.take(10) ?: "unknown"})",
+                    it,
+                    muted = true,
+                )
+            }
 
             // Charges since the last statement — these land on the bill due
             // ${due.cycleDueDate}, not the one above.

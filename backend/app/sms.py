@@ -100,6 +100,24 @@ EXTRACTION_SCHEMA = {
             "description": "If is_transaction is false, one short phrase saying what it is.",
             "nullable": True,
         },
+        "new_credit_limit": {
+            "type": "string",
+            "description": (
+                "If the message announces a NEW credit limit, the new total limit "
+                "as digits. From 'revised to INR 36300.00' this is 36300.00. Null "
+                "otherwise. An INCREASE BY amount is not the new limit - only give "
+                "a figure when the message states the resulting total."
+            ),
+            "nullable": True,
+        },
+        "credit_limit_effective": {
+            "type": "string",
+            "description": (
+                "Date the new limit takes effect, ISO 8601 (2026-08-30). Null if "
+                "not stated or if there is no limit change."
+            ),
+            "nullable": True,
+        },
     },
     "required": [
         "is_transaction",
@@ -112,6 +130,8 @@ EXTRACTION_SCHEMA = {
         "occurred_at",
         "reported_balance",
         "reason",
+        "new_credit_limit",
+        "credit_limit_effective",
     ],
 }
 
@@ -169,6 +189,12 @@ class Extraction:
     status: Literal["parsed", "ignored", "needs_review", "failed"]
     txn: TransactionIn | None = None
     error: str | None = None
+
+    # A credit-limit announcement is not a transaction, but it IS the only
+    # place the bank tells us the limit — and `outstanding` is computed from
+    # it. Carried out separately so the caller can update the account.
+    new_credit_limit: str | None = None
+    credit_limit_effective: str | None = None
 
     # Returned alongside the transaction as well as on it: turning digits into
     # an account_id needs a database lookup, which has no place in a parser.
@@ -322,7 +348,10 @@ def extract(
         # a possible transaction on the floor — this is the silent failure
         # that would otherwise never surface, because 'ignored' rows are
         # excluded from the alarm list on purpose.
-        if looks_like_money(body) and avoid_model is None:
+        limit_amount = data.get("new_credit_limit")
+        limit_from = data.get("credit_limit_effective")
+
+        if looks_like_money(body) and avoid_model is None and not limit_amount:
             second = extract(sender, body, avoid_model=used)
 
             if second.status == "parsed":
@@ -347,7 +376,17 @@ def extract(
                 model=used,
             )
 
-        return Extraction(status="ignored", error=reason, model=used)
+        return Extraction(
+            status="ignored",
+            error=reason,
+            model=used,
+            # Carried even though this isn't a transaction: a credit-limit
+            # notice names the card it applies to, and without those digits
+            # there is no way to know which account to update.
+            account_last4=data.get("account_last4") or None,
+            new_credit_limit=limit_amount,
+            credit_limit_effective=limit_from,
+        )
 
     amount_raw = data.get("amount")
     if not amount_raw:

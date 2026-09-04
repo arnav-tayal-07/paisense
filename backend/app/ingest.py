@@ -9,6 +9,7 @@ exactly the data loss the table exists to prevent.
 """
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from .accounts import resolve_account_id
 from .db import get_conn
@@ -108,6 +109,11 @@ def process_raw(raw: dict) -> dict:
         # ignored / needs_review / failed all land here, kept distinct so a
         # genuine miss isn't buried among correctly-skipped OTPs.
         with get_conn() as conn:
+            # A credit-limit notice is not a transaction, but it carries the
+            # only figure `outstanding` can be computed from. Applying it here
+            # is what stops the limit being a number someone typed in once and
+            # then silently going stale the next time the bank revises it.
+            _apply_credit_limit(conn, raw, result)
             return conn.execute(
                 _UPDATE_RAW, (result.status, result.error, None, result.model, raw["id"])
             ).fetchone()
@@ -139,6 +145,66 @@ def process_raw(raw: dict) -> dict:
 
         _drop_orphan(conn, raw.get("transaction_id"), row["id"])
         return updated
+
+
+def _apply_credit_limit(conn, raw: dict, result) -> None:
+    """Record a new credit limit the bank announced.
+
+    A limit notice is not a transaction, but it carries the only figure
+    `outstanding` can be derived from. Without this the limit is a number
+    somebody typed in once, which goes quietly stale the next time the bank
+    revises it — and a stale limit silently produces a wrong debt.
+
+    Only ever moves the limit forward in time, so a message arriving out of
+    order, or replayed during a re-import, cannot overwrite a newer limit
+    with an older one.
+    """
+    if not result.new_credit_limit or not result.account_last4:
+        return
+
+    account_id = resolve_account_id(
+        conn, raw["sender"], result.account_last4, "credit_card"
+    )
+    if account_id is None:
+        return
+
+    try:
+        amount = Decimal(str(result.new_credit_limit).replace(",", "").strip())
+    except (InvalidOperation, ValueError):
+        return
+
+    effective = result.credit_limit_effective
+    conn.execute(
+        """update accounts
+           set credit_limit = %s,
+               credit_limit_from = coalesce(%s::date, credit_limit_from)
+           where id = %s
+             and (credit_limit_from is null
+                  or %s::date is null
+                  or %s::date >= credit_limit_from)""",
+        (amount, effective, account_id, effective, effective),
+    )
+
+
+def _drop_orphan(conn, previous_id, new_id) -> None:
+    """Delete the transaction a re-parse just replaced, if nothing points at it.
+
+    Re-processing a message can produce a DIFFERENT transaction — that is what
+    happened when the dedupe key format changed. The message gets repointed at
+    the new row and the old one is left behind with nothing referring to it,
+    surfacing as a phantom duplicate in every list.
+
+    Only removes rows no raw_sms references and that came from SMS, so manual
+    entries and genuinely shared transactions are untouched.
+    """
+    if not previous_id or previous_id == new_id:
+        return
+    conn.execute(
+        """delete from transactions t
+           where t.id = %s and t.source = 'sms'
+             and not exists (select 1 from raw_sms r where r.transaction_id = t.id)""",
+        (previous_id,),
+    )
 
 
 def _record_pattern_hit(raw: dict, hit) -> dict:

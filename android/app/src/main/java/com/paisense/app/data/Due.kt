@@ -32,6 +32,8 @@ data class Due(
     val outstanding: String? = null,
     @SerialName("outstanding_unknown_reason") val outstandingUnknownReason: String? = null,
     @SerialName("available_limit") val availableLimit: String? = null,
+    /** When the bank reported that balance. Without it, an old figure reads as current. */
+    @SerialName("available_limit_at") val availableLimitAt: String? = null,
 ) {
     /** Human label for the cycle that is still accumulating. */
     fun cycleStartLabel(): String = statementDate

@@ -214,8 +214,12 @@ def dues(conn: Connection) -> list[dict]:
                 "outstanding": outstanding,
                 "outstanding_unknown_reason": reason,
                 "outstanding_basis": basis,
-                # What the bank last said was left to spend.
+                # What the bank last said was left to spend, AND when it said
+                # it. Showing the figure without the date made a 27 August
+                # balance look like today's — the number wasn't broken, the
+                # label was.
                 "available_limit": available,
+                "available_limit_at": snapshot_at.isoformat() if snapshot_at else None,
             }
         )
 
