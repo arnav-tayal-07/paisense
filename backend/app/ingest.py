@@ -133,9 +133,12 @@ def process_raw(raw: dict) -> dict:
         if reason:
             conn.execute(_MARK_REVIEW, (reason, row["id"]))
 
-        return conn.execute(
+        updated = conn.execute(
             _UPDATE_RAW, ("parsed", None, row["id"], result.model, raw["id"])
         ).fetchone()
+
+        _drop_orphan(conn, raw.get("transaction_id"), row["id"])
+        return updated
 
 
 def _record_pattern_hit(raw: dict, hit) -> dict:

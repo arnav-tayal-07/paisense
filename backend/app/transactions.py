@@ -7,6 +7,7 @@ ON CONFLICT handling.
 """
 
 from datetime import datetime
+from decimal import Decimal
 
 from psycopg import Connection
 
@@ -271,9 +272,13 @@ def summary(conn: Connection, start=None, end=None) -> dict:
     rows = conn.execute(_SUMMARY, (start, start, end, end)).fetchall()
     buckets = {r["bucket"]: {"count": r["count"], "total": r["total"]} for r in rows}
 
+    # Decimal("0"), not 0. An int here serialises as a JSON number while every
+    # populated bucket serialises as a string, and a client that expects one
+    # type gets the other the moment a bucket happens to be empty. That is
+    # exactly what broke the app the first day someone had no manual income.
     for key in ("income", "received", "card_spend", "account_spend",
                 "card_payment", "card_payment_mirror", "unlinked"):
-        buckets.setdefault(key, {"count": 0, "total": 0})
+        buckets.setdefault(key, {"count": 0, "total": Decimal("0")})
 
     spent = buckets["card_spend"]["total"] + buckets["account_spend"]["total"]
     income = buckets["income"]["total"]
