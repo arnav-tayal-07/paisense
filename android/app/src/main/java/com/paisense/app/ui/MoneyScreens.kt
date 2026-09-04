@@ -93,16 +93,16 @@ fun SummarySection(data: HomeData, modifier: Modifier = Modifier) {
 /**
  * The Card tab: what you owe, when, and what you've charged.
  *
- * Previously this listed BILL PAYMENTS, which is what you paid rather than
- * what you spent — opposite directions, and the reason the tab read as
- * nonsense.
+ * Bill payments are not here at all. They are what you PAID, not what you
+ * spent — opposite directions, and listing them next to charges is what made
+ * this tab read as nonsense. They stay in the database and still reconcile
+ * the summary; they are simply not something you need to look at.
  */
 @Composable
 fun CardSection(
     dues: List<Due>,
     onSetLimit: ((Long, String) -> Unit)? = null,
     spends: List<Transaction>,
-    payments: List<Transaction>,
     modifier: Modifier = Modifier,
     onEdit: ((Transaction, String, String) -> Unit)? = null,
 ) {
@@ -130,25 +130,6 @@ fun CardSection(
             }
         }
 
-        if (payments.isNotEmpty()) {
-            item {
-                Spacer(Modifier.height(8.dp))
-                Text("Bill payments", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Money paid TO the card. Not spending — it settles charges already counted.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            items(payments, key = { "p" + it.id }) { txn ->
-                Card(
-                    Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                    ),
-                ) { TxnRow(txn) }
-            }
-        }
     }
 }
 
@@ -203,12 +184,11 @@ private fun DueCard(due: Due, onSetLimit: ((Long, String) -> Unit)? = null) {
             // What this cycle's bill will ask for.
             Figure("Spent this cycle", due.cycleSpend)
 
-            // Money paid TO the card during this cycle. Shown because it is
-            // real, but never added back to `available`: it cleared the
-            // previous bill, which this model already treats as settled.
-            if (due.paid != "0") {
-                Figure("Paid this cycle", due.paid, muted = true)
-            }
+            // Bill payments are deliberately not shown. They are not
+            // spending, and they never move `available` — they cleared the
+            // previous bill, which this model already assumes settled. Two
+            // separate bugs came from that number being visible and looking
+            // like it should count for something.
 
             if (due.available != null) {
                 Figure("Available to spend", due.available)

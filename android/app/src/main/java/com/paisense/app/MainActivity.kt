@@ -157,14 +157,10 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
                     modifier = content,
                 )
 
-                // Card spending AND bill payments, kept visually apart -
-                // this tab used to list only bill payments, which is what was
-                // PAID rather than what was SPENT.
                 else -> CardSection(
                     dues = s.data.dues,
                     onSetLimit = viewModel::setCreditLimit,
                     spends = s.data.cardSpends,
-                    payments = s.data.cardPayments,
                     modifier = content,
                     onEdit = { txn, name, cat -> viewModel.rename(txn.id, name, cat) },
                 )

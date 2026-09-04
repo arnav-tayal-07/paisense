@@ -30,7 +30,6 @@ data class HomeData(
     val received: List<Transaction> = emptyList(),
     /** Purchases made ON a credit card. */
     val cardSpends: List<Transaction> = emptyList(),
-    val cardPayments: List<Transaction> = emptyList(),
     val dues: List<Due> = emptyList(),
     /** What went wrong, if anything, so a partial load can say so quietly. */
     val problems: List<String> = emptyList(),
@@ -110,7 +109,6 @@ class HomeViewModel : ViewModel() {
         val expensesJob = async { runCatching { Api.transactionsOfType("expense") } }
         val incomeJob = async { runCatching { Api.transactionsOfType("income", source = "manual") } }
         val receivedJob = async { runCatching { Api.transactionsOfType("income", source = "sms") } }
-        val paymentsJob = async { runCatching { Api.transactionsOfType("card_payment") } }
         val cardSpendJob = async { runCatching { Api.cardSpends() } }
         val duesJob = async { runCatching { Api.dues() } }
 
@@ -118,8 +116,7 @@ class HomeViewModel : ViewModel() {
         val e = expensesJob.await()
         val i = incomeJob.await()
         val r = receivedJob.await()
-        val p = paymentsJob.await()
-        val d = duesJob.await()
+                val d = duesJob.await()
         val cs = cardSpendJob.await()
 
         HomeData(
@@ -128,9 +125,8 @@ class HomeViewModel : ViewModel() {
             income = i.getOrDefault(emptyList()),
             received = r.getOrDefault(emptyList()),
             cardSpends = cs.getOrDefault(emptyList()),
-            cardPayments = p.getOrDefault(emptyList()),
             dues = d.getOrDefault(emptyList()),
-            problems = listOf(s, e, i, r, p, d, cs).mapNotNull { it.exceptionOrNull()?.message },
+            problems = listOf(s, e, i, r, d, cs).mapNotNull { it.exceptionOrNull()?.message },
         )
     }
 }
