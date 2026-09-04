@@ -2,6 +2,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Talking to paisense.onrender.com. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Reading the inbox for history, and catching messages as they arrive.
+         Both are restricted permissions: Google only allows them for apps
+         whose core function is SMS handling, so PaiSense can never go on the
+         Play Store. Sideloaded APKs are unaffected. See ADR 001 and 027. -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+
+    <!-- Android 13+ requires asking before an app may post notifications.
+         Without it the import worker runs silently and looks like nothing
+         is happening. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

@@ -56,6 +56,10 @@ fun OnboardingScreen(
     }
 
     LaunchedEffect(Unit) {
+        // Watch first: an import may already be running from a previous visit,
+        // in which case its progress should reappear rather than the range
+        // picker offering to start a second one.
+        viewModel.observe(context)
         if (hasSmsPermission(context)) viewModel.onPermissionGranted(context)
     }
 
@@ -73,9 +77,17 @@ fun OnboardingScreen(
                 )
                 Spacer(Modifier.height(24.dp))
                 Button(onClick = {
-                    permissionLauncher.launch(
-                        arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS)
+                    // POST_NOTIFICATIONS asked at the same time: without it
+                    // the import worker runs silently and looks like nothing
+                    // is happening. Only exists on Android 13+.
+                    val wanted = mutableListOf(
+                        Manifest.permission.READ_SMS,
+                        Manifest.permission.RECEIVE_SMS,
                     )
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        wanted += Manifest.permission.POST_NOTIFICATIONS
+                    }
+                    permissionLauncher.launch(wanted.toTypedArray())
                 }) { Text("Allow") }
                 Spacer(Modifier.height(8.dp))
                 TextButton(onClick = onDone) { Text("Not now") }
@@ -134,8 +146,9 @@ fun OnboardingScreen(
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
                 Spacer(Modifier.height(16.dp))
-                // Extraction continues server-side whether or not this screen
-                // is open, so there is no reason to hold the user here.
+                // Genuinely background now: WorkManager owns the job, so
+                // leaving here does not stop it. Progress continues in the
+                // notification shade.
                 TextButton(onClick = onDone) { Text("Continue in background") }
             }
 
