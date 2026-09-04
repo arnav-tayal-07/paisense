@@ -24,7 +24,7 @@ class TransactionPatch(BaseModel):
     SMS insert a second row on the next re-scan), `source`, and `created_at`.
     """
 
-    type: Optional[Literal["expense", "income", "card_payment"]] = None
+    type: Optional[Literal["expense", "income", "card_payment", "blocked"]] = None
     amount: Optional[Decimal] = Field(default=None, gt=0, max_digits=12, decimal_places=2)
     merchant: Optional[str] = None
     category: Optional[str] = None
@@ -133,7 +133,7 @@ class TransactionIn(BaseModel):
     # letting Postgres raise a constraint violation that surfaces as a 500.
     # card_payment = settling a credit card bill: neither spending nor
     # earnings, and excluded from both totals. See ADR 016.
-    type: Literal["expense", "income", "card_payment"]
+    type: Literal["expense", "income", "card_payment", "blocked"]
 
     # Decimal, not float — the same reason the column is numeric(12,2).
     # gt=0 mirrors `check (amount > 0)`; direction lives in `type`.

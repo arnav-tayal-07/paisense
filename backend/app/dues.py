@@ -42,30 +42,52 @@ def cycle_for(account: dict, today: date | None = None) -> dict | None:
     today = today or datetime.now(IST).date()
     statement_day = account["statement_day"]
 
-    # The statement that closes the cycle we are in right now. If this month's
-    # statement has already generated, the open cycle closes next month.
-    stmt = _clamp(today.year, today.month, statement_day)
-    if today > stmt:
-        y, m = _add_month(stmt)
-        stmt = _clamp(y, m, statement_day)
+    def due_for(stmt: date) -> date:
+        if account.get("due_day"):
+            # Fixed day of the month AFTER the statement.
+            y, m = _add_month(stmt)
+            return _clamp(y, m, account["due_day"])
+        return stmt + timedelta(days=account.get("due_days_after") or 20)
 
-    # The cycle started the day after the previous statement.
-    prev_y, prev_m = (stmt.year - 1, 12) if stmt.month == 1 else (stmt.year, stmt.month - 1)
-    cycle_start = _clamp(prev_y, prev_m, statement_day) + timedelta(days=1)
+    # The statement that closes the cycle currently accumulating. If this
+    # month's statement has already generated, the open cycle closes next month.
+    next_stmt = _clamp(today.year, today.month, statement_day)
+    if today > next_stmt:
+        y, m = _add_month(next_stmt)
+        next_stmt = _clamp(y, m, statement_day)
 
-    if account.get("due_day"):
-        # Fixed day of the month AFTER the statement.
-        y, m = _add_month(stmt)
-        due = _clamp(y, m, account["due_day"])
-    else:
-        due = stmt + timedelta(days=account.get("due_days_after") or 20)
+    cycle_start = _prev_statement(next_stmt, statement_day) + timedelta(days=1)
+
+    # THE BILL YOU ACTUALLY OWE NEXT.
+    #
+    # Reporting only the accumulating cycle was wrong and dangerously so: with
+    # a statement on the 24th, on 4 September the open cycle closes 24
+    # September and is due 8 October — but the statement generated on 24 August
+    # is due on 8 SEPTEMBER, four days away. Showing October would have let a
+    # bill go unpaid while the app said there was a month to spare.
+    last_stmt = _prev_statement(next_stmt, statement_day)
+    last_due = due_for(last_stmt)
+
+    # Once that bill's due date has passed, the next one owed is the upcoming
+    # statement's.
+    if last_due < today:
+        last_stmt, last_due = next_stmt, due_for(next_stmt)
 
     return {
+        # The payment to make next, and what it covers.
+        "due_date": last_due.isoformat(),
+        "days_until_due": (last_due - today).days,
+        "billed_statement_date": last_stmt.isoformat(),
+        # The cycle still accumulating — spending here lands on a LATER bill.
         "cycle_start": cycle_start.isoformat(),
-        "statement_date": stmt.isoformat(),
-        "due_date": due.isoformat(),
-        "days_until_due": (due - today).days,
+        "statement_date": next_stmt.isoformat(),
+        "cycle_due_date": due_for(next_stmt).isoformat(),
     }
+
+
+def _prev_statement(stmt: date, statement_day: int) -> date:
+    y, m = (stmt.year - 1, 12) if stmt.month == 1 else (stmt.year, stmt.month - 1)
+    return _clamp(y, m, statement_day)
 
 
 _CYCLE_SPEND = """
@@ -108,21 +130,32 @@ def dues(conn: Connection) -> list[dict]:
         ).fetchone()
         owed = conn.execute(_OUTSTANDING, (account["id"],)).fetchone()
 
-        # A negative balance means bill payments exceed the purchases we know
-        # about — which happens whenever history starts mid-cycle, because
-        # those payments settled purchases from before the import window.
-        # Reporting the negative number as "outstanding" would be a confident
-        # lie; saying we can't compute it yet is the truth.
-        outstanding = owed["owed"] if owed["owed"] >= 0 else None
-
-        # The bank's own figure, if a recent card SMS carried one. More
-        # reliable than anything derived from partial history.
+        # The bank's own figure, if a recent card SMS carried one.
         reported = conn.execute(
             """select reported_balance from transactions
                where account_id = %s and reported_balance is not null
                order by txn_time desc limit 1""",
             (account["id"],),
         ).fetchone()
+        available = reported["reported_balance"] if reported else None
+
+        # Prefer the bank's arithmetic: limit minus what's still available IS
+        # what you owe, and it needs no history at all. Deriving it from our
+        # own rows requires every purchase since the account opened, which we
+        # don't have — that produced a NEGATIVE outstanding, because the bill
+        # payments we recorded settled purchases from before the import window.
+        if account.get("credit_limit") is not None and available is not None:
+            outstanding = account["credit_limit"] - available
+            reason = None
+        elif owed["owed"] >= 0:
+            outstanding = owed["owed"]
+            reason = None
+        else:
+            outstanding = None
+            reason = (
+                "set the card's credit limit to compute this — our own history "
+                "starts mid-cycle, so bill payments exceed recorded purchases"
+            )
 
         out.append(
             {
@@ -133,12 +166,9 @@ def dues(conn: Connection) -> list[dict]:
                 "cycle_spend": spend["total"],
                 "cycle_count": spend["count"],
                 "outstanding": outstanding,
-                "outstanding_unknown_reason": (
-                    None if outstanding is not None
-                    else "bill payments exceed recorded purchases - history starts mid-cycle"
-                ),
+                "outstanding_unknown_reason": reason,
                 # What the bank last said was left to spend.
-                "available_limit": reported["reported_balance"] if reported else None,
+                "available_limit": available,
             }
         )
 

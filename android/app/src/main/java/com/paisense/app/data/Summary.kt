@@ -24,8 +24,12 @@ data class Summary(
 @Serializable
 data class Buckets(
     val income: Bucket = Bucket(),
+    /** Bank credits: refunds, transfers, split settlements. Not income. */
+    val received: Bucket = Bucket(),
     @SerialName("card_spend") val cardSpend: Bucket = Bucket(),
     @SerialName("account_spend") val accountSpend: Bucket = Bucket(),
     @SerialName("card_payment") val cardPayment: Bucket = Bucket(),
+    /** The card-side mirror of a bill payment. Never added to a total. */
+    @SerialName("card_payment_mirror") val cardPaymentMirror: Bucket = Bucket(),
     val unlinked: Bucket = Bucket(),
 )

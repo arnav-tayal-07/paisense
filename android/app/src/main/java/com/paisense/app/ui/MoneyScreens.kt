@@ -42,26 +42,129 @@ fun SummarySection(data: HomeData, modifier: Modifier = Modifier) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Summary", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.height(12.dp))
-                    Figure("Total income", data.summary.totalIncome, positive = true)
-                    Figure("Spent from accounts", data.summary.buckets.accountSpend.total)
-                    Figure("Spent on cards", data.summary.buckets.cardSpend.total)
-                    if (data.summary.buckets.unlinked.count > 0) {
-                        // Wallets and IPO blocks - real money, but tied to no
-                        // bank account, so it belongs to neither category.
-                        Figure("Wallets & other", data.summary.buckets.unlinked.total, muted = true)
+        // The summary is optional. If that one call failed, the card is
+        // simply absent and the due cards below still render — a broken part
+        // should cost you that part, not the screen.
+        data.summary?.let { summary ->
+            item {
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Summary", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(12.dp))
+                        Figure("Income entered", summary.totalIncome, positive = true)
+                        Figure("Received (bank credits)", summary.buckets.received.total, muted = true)
+                        HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                        Figure("Spent from accounts", summary.buckets.accountSpend.total)
+                        Figure("Spent on cards", summary.buckets.cardSpend.total)
+                        Figure("Card bills paid", summary.buckets.cardPayment.total, muted = true)
+                        if (summary.buckets.unlinked.count > 0) {
+                            // Wallets and IPO blocks - real money, but tied to
+                            // no bank account, so neither category fits.
+                            Figure("Wallets & other", summary.buckets.unlinked.total, muted = true)
+                        }
+                        // No "Balance" line for now: income is manual and
+                        // mostly unfilled, so a balance would just be a large
+                        // negative number that means nothing yet.
                     }
-                    HorizontalDivider(Modifier.padding(vertical = 12.dp))
-                    Figure("Balance", data.summary.net, positive = !data.summary.net.startsWith("-"))
                 }
             }
         }
 
+        if (data.problems.isNotEmpty()) {
+            item {
+                Text(
+                    "Some parts didn't load: ${data.problems.first()}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+            }
+        }
+
         items(data.dues, key = { it.accountId }) { DueCard(it) }
+    }
+}
+
+/**
+ * The Card tab: what you owe, when, and what you've charged.
+ *
+ * Previously this listed BILL PAYMENTS, which is what you paid rather than
+ * what you spent — opposite directions, and the reason the tab read as
+ * nonsense.
+ */
+@Composable
+fun CardSection(
+    dues: List<Due>,
+    spends: List<Transaction>,
+    payments: List<Transaction>,
+    modifier: Modifier = Modifier,
+    onEdit: ((Transaction, String, String) -> Unit)? = null,
+) {
+    var editing by remember { mutableStateOf<Transaction?>(null) }
+
+    editing?.let { txn ->
+        EditTransactionDialog(txn, onDismiss = { editing = null }) { name, cat ->
+            onEdit?.invoke(txn, name, cat); editing = null
+        }
+    }
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        items(dues, key = { it.accountId }) { DueCard(it) }
+
+        if (spends.isNotEmpty()) {
+            item { Text("Charged to cards", style = MaterialTheme.typography.titleMedium) }
+            items(spends, key = { "s" + it.id }) { txn ->
+                Card(Modifier.fillMaxWidth().clickable(enabled = onEdit != null) { editing = txn }) {
+                    TxnRow(txn)
+                }
+            }
+        }
+
+        if (payments.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(8.dp))
+                Text("Bill payments", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Money paid TO the card. Not spending — it settles charges already counted.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            items(payments, key = { "p" + it.id }) { txn ->
+                Card(
+                    Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                ) { TxnRow(txn) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TxnRow(txn: Transaction) {
+    Row(
+        Modifier.fillMaxWidth().padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(txn.payee, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                txn.localDate + (txn.accountLast4?.let { "  ·  $it" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Text(
+            "₹" + txn.amount,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 
@@ -75,29 +178,43 @@ private fun DueCard(due: Due) {
             Text(due.name, style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
 
+            // The bill actually owed next - from the statement that has ALREADY
+            // generated, not the cycle still running. Showing the open cycle's
+            // date would have said "34 days" while a bill was due in 4.
             Text(
                 "Next payment due ${due.dueDate}  ·  ${due.daysUntilDue} days",
                 style = MaterialTheme.typography.bodyMedium,
+                color = if (due.daysUntilDue <= 7) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "for the statement of ${due.billedStatementDate}",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(12.dp))
 
-            // What the NEXT bill will ask for - only spending since the last
-            // statement, not everything ever charged.
-            Figure("This cycle (since ${due.statementDate})", due.cycleSpend)
-
-            due.availableLimit?.let { Figure("Available limit", it, muted = true) }
-
             if (due.outstanding != null) {
-                Figure("Outstanding", due.outstanding)
+                Figure("Outstanding now", due.outstanding)
             } else due.outstandingUnknownReason?.let {
                 Text(
-                    "Outstanding unavailable — $it",
+                    it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp),
+                    modifier = Modifier.padding(bottom = 8.dp),
                 )
             }
+
+            due.creditLimit?.let { Figure("Credit limit", it, muted = true) }
+            due.availableLimit?.let { Figure("Available now", it, muted = true) }
+
+            // Charges since the last statement — these land on the bill due
+            // ${due.cycleDueDate}, not the one above.
+            Figure(
+                "Since ${due.statementDate.let { due.cycleStartLabel() }} (next bill)",
+                due.cycleSpend,
+                muted = true,
+            )
         }
     }
 }

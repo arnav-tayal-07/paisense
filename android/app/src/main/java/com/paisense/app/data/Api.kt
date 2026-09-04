@@ -147,6 +147,17 @@ object Api {
         patch("/transactions/$id", json.encodeToString(JsonObject.serializer(), body))
     }
 
+    /**
+     * Purchases made ON a credit card — not bill payments.
+     *
+     * The Card tab was showing bill payments, which is what you PAID rather
+     * than what you SPENT. Those are opposite directions.
+     */
+    suspend fun cardSpends(limit: Int = 200): List<Transaction> =
+        json.decodeFromString(
+            get("/transactions?type=expense&account_kind=credit_card&limit=$limit")
+        )
+
     /** Next payment date and amount for every credit card. */
     suspend fun dues(): List<Due> = json.decodeFromString(get("/dues"))
 

@@ -14,25 +14,32 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Everything the three money tabs need, loaded once.
+ * Everything the money tabs need.
  *
- * Income, expenses and card sections all read from the same fetch rather than
- * each firing its own — on a free-tier server that sleeps, three separate cold
- * starts would mean three separate minute-long waits.
+ * Each field is fetched independently and allowed to FAIL independently. One
+ * endpoint returning something unexpected used to blank the entire app — a
+ * single malformed number in the summary meant no expenses either, which is a
+ * terrible trade. Now a broken part is empty and the rest still shows.
  */
 data class HomeData(
-    val summary: Summary,
-    val expenses: List<Transaction>,
+    /** Null when the summary call failed. The lists remain usable. */
+    val summary: Summary? = null,
+    val expenses: List<Transaction> = emptyList(),
     /** Only what the user typed. Bank credits live in [received]. */
-    val income: List<Transaction>,
-    val received: List<Transaction>,
-    val cardPayments: List<Transaction>,
-    val dues: List<Due>,
+    val income: List<Transaction> = emptyList(),
+    val received: List<Transaction> = emptyList(),
+    /** Purchases made ON a credit card. */
+    val cardSpends: List<Transaction> = emptyList(),
+    val cardPayments: List<Transaction> = emptyList(),
+    val dues: List<Due> = emptyList(),
+    /** What went wrong, if anything, so a partial load can say so quietly. */
+    val problems: List<String> = emptyList(),
 )
 
 sealed interface HomeState {
     data object Loading : HomeState
     data class Loaded(val data: HomeData) : HomeState
+    /** Only when EVERYTHING failed — usually the server being unreachable. */
     data class Failed(val message: String) : HomeState
 }
 
@@ -48,10 +55,13 @@ class HomeViewModel : ViewModel() {
     fun load() {
         _state.value = HomeState.Loading
         viewModelScope.launch {
-            _state.value = try {
-                HomeState.Loaded(fetch())
-            } catch (e: Exception) {
-                HomeState.Failed(e.message ?: e.toString())
+            val data = fetch()
+            // A full-screen error only when nothing at all came back. Anything
+            // less is a partial load, and four working tabs beat none.
+            _state.value = if (data.problems.size >= 7) {
+                HomeState.Failed(data.problems.first())
+            } else {
+                HomeState.Loaded(data)
             }
         }
     }
@@ -59,15 +69,14 @@ class HomeViewModel : ViewModel() {
     /** Rename a transaction, then reload so every tab reflects it. */
     fun rename(id: Long, name: String, category: String) {
         viewModelScope.launch {
-            try {
+            // Reloading below shows the unchanged value, so a failed save
+            // reads as "the name didn't stick" rather than a false success.
+            runCatching {
                 Api.updateTransaction(
                     id = id,
                     merchant = name.ifBlank { null },
                     category = category.ifBlank { null },
                 )
-            } catch (_: Exception) {
-                // Reloading below surfaces the unchanged value, so a failed
-                // save shows as "the name didn't stick" rather than a lie.
             }
             load()
         }
@@ -76,29 +85,44 @@ class HomeViewModel : ViewModel() {
     /** Add income by hand, then reload. */
     fun addIncome(amount: String, source: String, date: String) {
         viewModelScope.launch {
-            try {
-                Api.addIncome(amount, source, date)
-            } catch (_: Exception) {
-            }
+            runCatching { Api.addIncome(amount, source, date) }
             load()
         }
     }
 
-    /** Five calls in parallel — the server wakes once, not five times. */
+    /**
+     * Six calls in parallel, each surviving the others' failures.
+     *
+     * Parallel because a sleeping free-tier server should wake once, not six
+     * times. Independently caught because a fault in one endpoint must not
+     * take the other five down with it.
+     */
     private suspend fun fetch(): HomeData = coroutineScope {
-        val summary = async { Api.summary() }
-        val expenses = async { Api.transactionsOfType("expense") }
-        val income = async { Api.transactionsOfType("income", source = "manual") }
-        val received = async { Api.transactionsOfType("income", source = "sms") }
-        val payments = async { Api.transactionsOfType("card_payment") }
-        val dues = async { Api.dues() }
+        val summaryJob = async { runCatching { Api.summary() } }
+        val expensesJob = async { runCatching { Api.transactionsOfType("expense") } }
+        val incomeJob = async { runCatching { Api.transactionsOfType("income", source = "manual") } }
+        val receivedJob = async { runCatching { Api.transactionsOfType("income", source = "sms") } }
+        val paymentsJob = async { runCatching { Api.transactionsOfType("card_payment") } }
+        val cardSpendJob = async { runCatching { Api.cardSpends() } }
+        val duesJob = async { runCatching { Api.dues() } }
+
+        val s = summaryJob.await()
+        val e = expensesJob.await()
+        val i = incomeJob.await()
+        val r = receivedJob.await()
+        val p = paymentsJob.await()
+        val d = duesJob.await()
+        val cs = cardSpendJob.await()
+
         HomeData(
-            summary = summary.await(),
-            expenses = expenses.await(),
-            income = income.await(),
-            received = received.await(),
-            cardPayments = payments.await(),
-            dues = dues.await(),
+            summary = s.getOrNull(),
+            expenses = e.getOrDefault(emptyList()),
+            income = i.getOrDefault(emptyList()),
+            received = r.getOrDefault(emptyList()),
+            cardSpends = cs.getOrDefault(emptyList()),
+            cardPayments = p.getOrDefault(emptyList()),
+            dues = d.getOrDefault(emptyList()),
+            problems = listOf(s, e, i, r, p, d, cs).mapNotNull { it.exceptionOrNull()?.message },
         )
     }
 }

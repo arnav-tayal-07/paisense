@@ -33,6 +33,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.paisense.app.ui.HomeState
 import com.paisense.app.ui.HomeViewModel
 import com.paisense.app.ui.IncomeScreen
+import com.paisense.app.ui.CardSection
 import com.paisense.app.ui.LedgerSection
 import com.paisense.app.ui.OnboardingScreen
 import com.paisense.app.ui.ReviewScreen
@@ -157,8 +158,14 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
                     modifier = content,
                 )
 
-                else -> LedgerSection(
-                    s.data.cardPayments, "No card bill payments", content,
+                // Card spending AND bill payments, kept visually apart -
+                // this tab used to list only bill payments, which is what was
+                // PAID rather than what was SPENT.
+                else -> CardSection(
+                    dues = s.data.dues,
+                    spends = s.data.cardSpends,
+                    payments = s.data.cardPayments,
+                    modifier = content,
                     onEdit = { txn, name, cat -> viewModel.rename(txn.id, name, cat) },
                 )
             }

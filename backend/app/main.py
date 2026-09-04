@@ -397,7 +397,7 @@ def get_transactions(
     limit: int = Query(default=50, ge=1, le=200),
     # alias="type" keeps the query parameter named ?type= while the Python
     # argument avoids shadowing the built-in `type`.
-    txn_type: Literal["expense", "income", "card_payment"] | None = Query(
+    txn_type: Literal["expense", "income", "card_payment", "blocked"] | None = Query(
         default=None, alias="type"
     ),
     category: str | None = None,
@@ -406,7 +406,15 @@ def get_transactions(
         default=None,
         description="Where the row came from. 'manual' is the only real income - see /summary.",
     ),
-    account_id: int | None = Query(default=None, description="Spend on one card"),
+    account_id: int | None = Query(default=None, description="Spend on one account"),
+    account_kind: Literal["credit_card", "bank_account"] | None = Query(
+        default=None,
+        description=(
+            "Only transactions on accounts of this kind. Card spending vs "
+            "account spending, decided here rather than by the client pulling "
+            "everything and filtering it."
+        ),
+    ),
     start: datetime | None = Query(default=None, description="Inclusive lower bound on txn_time"),
     end: datetime | None = Query(default=None, description="Exclusive upper bound on txn_time"),
     include_unreviewed: bool = Query(
@@ -429,6 +437,7 @@ def get_transactions(
             merchant=merchant,
             source=source,
             account_id=account_id,
+            account_kind=account_kind,
             start=start,
             end=end,
             countable_only=not include_unreviewed,

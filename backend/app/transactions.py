@@ -81,6 +81,7 @@ def list_transactions(
     merchant: str | None = None,
     source: str | None = None,
     account_id: int | None = None,
+    account_kind: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     countable_only: bool = True,
@@ -105,6 +106,10 @@ def list_transactions(
         # Spend per card. The SMS gives a last4 string; the parser resolves
         # that to a account_id, so filtering happens on the foreign key.
         ("account_id = %s", account_id),
+        # Card spending vs account spending, decided server-side. The app used
+        # to pull every expense and filter locally, which needed a limit above
+        # the 200 cap and returned 422.
+        ("account_id in (select id from accounts where kind = %s)", account_kind),
         # Half-open interval: start <= txn_time < end. Using <= on both ends
         # would double-count a transaction landing exactly at midnight on the
         # boundary when the agent asks for two consecutive months.
@@ -233,6 +238,12 @@ select
     when t.type = 'income' and t.source = 'manual' then 'income'
     when t.type = 'income'       then 'received'
 
+    -- 'blocked' is a legal type but nothing produces it any more: the
+    -- extractor now refuses IPO and mandate blocks outright as not being
+    -- transactions at all. Kept in the CASE so an old row can't silently
+    -- fall through into a spending bucket.
+    when t.type = 'blocked'      then 'blocked'
+
     -- A card bill payment generates TWO messages: the bank says money left
     -- the account, the card says money arrived. One event, two notifications,
     -- and counting both doubled the total. Only the bank side is a real
@@ -277,7 +288,7 @@ def summary(conn: Connection, start=None, end=None) -> dict:
     # type gets the other the moment a bucket happens to be empty. That is
     # exactly what broke the app the first day someone had no manual income.
     for key in ("income", "received", "card_spend", "account_spend",
-                "card_payment", "card_payment_mirror", "unlinked"):
+                "card_payment", "card_payment_mirror", "blocked", "unlinked"):
         buckets.setdefault(key, {"count": 0, "total": Decimal("0")})
 
     spent = buckets["card_spend"]["total"] + buckets["account_spend"]["total"]
