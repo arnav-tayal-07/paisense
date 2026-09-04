@@ -4,6 +4,10 @@ import com.paisense.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -61,6 +65,22 @@ object Api {
         }
     }
 
+    private suspend fun patch(path: String, body: String): String =
+        withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url(BuildConfig.API_BASE + path)
+                .header("X-API-Key", BuildConfig.API_KEY)
+                .patch(body.toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    throw ApiException("HTTP ${response.code}: ${text.take(200)}")
+                }
+                text
+            }
+        }
+
     private suspend fun post(path: String, body: String? = null): String =
         withContext(Dispatchers.IO) {
             if (BuildConfig.API_KEY.isBlank()) {
@@ -86,12 +106,59 @@ object Api {
     suspend fun transactions(limit: Int = 100): List<Transaction> =
         json.decodeFromString(get("/transactions?limit=$limit"))
 
+    /**
+     * Record income by hand.
+     *
+     * Income is never taken from an SMS. A bank credit might be a refund, a
+     * friend settling a split, a cheque, or money moved between your own
+     * accounts — counting those as earnings makes the figure meaningless.
+     * Only what you type counts.
+     */
+    suspend fun addIncome(amount: String, source: String, date: String) {
+        val body = buildJsonObject {
+            put("type", JsonPrimitive("income"))
+            put("amount", JsonPrimitive(amount))
+            put("merchant", JsonPrimitive(source))
+            put("txn_time", JsonPrimitive(date))
+            put("source", JsonPrimitive("manual"))
+        }
+        post("/transactions", json.encodeToString(JsonObject.serializer(), body))
+    }
+
+    /**
+     * Rename or recategorise a transaction.
+     *
+     * Most UPI messages name no payee at all - RBL says "credited to a/c
+     * XX0233" and stops - so the only way those rows ever get a readable
+     * name is the user typing one. PATCH sends only what changed, so setting
+     * a name can't blank the amount.
+     */
+    suspend fun updateTransaction(
+        id: Long,
+        merchant: String? = null,
+        category: String? = null,
+        note: String? = null,
+    ) {
+        val body = buildJsonObject {
+            merchant?.let { put("merchant", JsonPrimitive(it)) }
+            category?.let { put("category", JsonPrimitive(it)) }
+            note?.let { put("note", JsonPrimitive(it)) }
+        }
+        patch("/transactions/$id", json.encodeToString(JsonObject.serializer(), body))
+    }
+
     /** Next payment date and amount for every credit card. */
     suspend fun dues(): List<Due> = json.decodeFromString(get("/dues"))
 
     /** Transactions of one type only - income, expense or card_payment. */
-    suspend fun transactionsOfType(type: String, limit: Int = 200): List<Transaction> =
-        json.decodeFromString(get("/transactions?type=$type&limit=$limit"))
+    suspend fun transactionsOfType(
+        type: String,
+        source: String? = null,
+        limit: Int = 200,
+    ): List<Transaction> {
+        val src = if (source != null) "&source=$source" else ""
+        return json.decodeFromString(get("/transactions?type=$type$src&limit=$limit"))
+    }
 
     /** Money split into income, card spending and account spending. */
     suspend fun summary(): Summary = json.decodeFromString(get("/summary"))

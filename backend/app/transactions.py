@@ -78,6 +78,7 @@ def list_transactions(
     txn_type: str | None = None,
     category: str | None = None,
     merchant: str | None = None,
+    source: str | None = None,
     account_id: int | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
@@ -99,6 +100,7 @@ def list_transactions(
         # ilike = case-insensitive LIKE. Wrapping in % makes it a contains
         # match, so "zom" finds "Zomato".
         ("merchant ilike %s", f"%{merchant}%" if merchant else None),
+        ("source = %s", source),
         # Spend per card. The SMS gives a last4 string; the parser resolves
         # that to a account_id, so filtering happens on the foreign key.
         ("account_id = %s", account_id),
@@ -222,7 +224,20 @@ def reconcile_account(conn: Connection, account_id: int) -> dict:
 _SUMMARY = """
 select
   case
-    when t.type = 'income'       then 'income'
+    -- Income you TYPED IN. A bank credit is not income: it might be a
+    -- refund, a friend settling a split, a cheque, or you moving your own
+    -- money between accounts. One of Arnav's credits is literally himself.
+    -- Counting those as earnings makes the figure meaningless, so only a
+    -- manual entry counts and SMS credits are reported separately.
+    when t.type = 'income' and t.source = 'manual' then 'income'
+    when t.type = 'income'       then 'received'
+
+    -- A card bill payment generates TWO messages: the bank says money left
+    -- the account, the card says money arrived. One event, two notifications,
+    -- and counting both doubled the total. Only the bank side is a real
+    -- outflow; the card side is its mirror, kept for computing what the card
+    -- still owes but never added to any total.
+    when t.type = 'card_payment' and a.kind = 'credit_card' then 'card_payment_mirror'
     when t.type = 'card_payment' then 'card_payment'
     when a.kind = 'credit_card'  then 'card_spend'
     when a.kind = 'bank_account' then 'account_spend'
@@ -256,17 +271,21 @@ def summary(conn: Connection, start=None, end=None) -> dict:
     rows = conn.execute(_SUMMARY, (start, start, end, end)).fetchall()
     buckets = {r["bucket"]: {"count": r["count"], "total": r["total"]} for r in rows}
 
-    for key in ("income", "card_spend", "account_spend", "card_payment", "unlinked"):
+    for key in ("income", "received", "card_spend", "account_spend",
+                "card_payment", "card_payment_mirror", "unlinked"):
         buckets.setdefault(key, {"count": 0, "total": 0})
 
     spent = buckets["card_spend"]["total"] + buckets["account_spend"]["total"]
+    income = buckets["income"]["total"]
     return {
         "buckets": buckets,
         # Deliberately excludes card_payment: a bill payment is not new
         # spending, it settles purchases already counted.
         "total_spent": spent,
-        "total_income": buckets["income"]["total"],
-        "net": buckets["income"]["total"] - spent,
+        # Only entries the user typed. Bank credits are in "received" and
+        # stay out of this figure - see the bucket comment above.
+        "total_income": income,
+        "net": income - spent,
     }
 
 

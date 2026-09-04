@@ -23,7 +23,9 @@ import kotlinx.coroutines.launch
 data class HomeData(
     val summary: Summary,
     val expenses: List<Transaction>,
+    /** Only what the user typed. Bank credits live in [received]. */
     val income: List<Transaction>,
+    val received: List<Transaction>,
     val cardPayments: List<Transaction>,
     val dues: List<Due>,
 )
@@ -54,17 +56,47 @@ class HomeViewModel : ViewModel() {
         }
     }
 
+    /** Rename a transaction, then reload so every tab reflects it. */
+    fun rename(id: Long, name: String, category: String) {
+        viewModelScope.launch {
+            try {
+                Api.updateTransaction(
+                    id = id,
+                    merchant = name.ifBlank { null },
+                    category = category.ifBlank { null },
+                )
+            } catch (_: Exception) {
+                // Reloading below surfaces the unchanged value, so a failed
+                // save shows as "the name didn't stick" rather than a lie.
+            }
+            load()
+        }
+    }
+
+    /** Add income by hand, then reload. */
+    fun addIncome(amount: String, source: String, date: String) {
+        viewModelScope.launch {
+            try {
+                Api.addIncome(amount, source, date)
+            } catch (_: Exception) {
+            }
+            load()
+        }
+    }
+
     /** Five calls in parallel — the server wakes once, not five times. */
     private suspend fun fetch(): HomeData = coroutineScope {
         val summary = async { Api.summary() }
         val expenses = async { Api.transactionsOfType("expense") }
-        val income = async { Api.transactionsOfType("income") }
+        val income = async { Api.transactionsOfType("income", source = "manual") }
+        val received = async { Api.transactionsOfType("income", source = "sms") }
         val payments = async { Api.transactionsOfType("card_payment") }
         val dues = async { Api.dues() }
         HomeData(
             summary = summary.await(),
             expenses = expenses.await(),
             income = income.await(),
+            received = received.await(),
             cardPayments = payments.await(),
             dues = dues.await(),
         )

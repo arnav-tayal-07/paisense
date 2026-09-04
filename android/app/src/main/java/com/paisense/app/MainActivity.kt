@@ -32,6 +32,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.paisense.app.ui.HomeState
 import com.paisense.app.ui.HomeViewModel
+import com.paisense.app.ui.IncomeScreen
 import com.paisense.app.ui.LedgerSection
 import com.paisense.app.ui.OnboardingScreen
 import com.paisense.app.ui.ReviewScreen
@@ -140,9 +141,26 @@ private fun MainScaffold(viewModel: HomeViewModel = viewModel()) {
 
             is HomeState.Loaded -> when (tab) {
                 0 -> SummarySection(s.data, content)
-                1 -> LedgerSection(s.data.expenses, "No spending recorded", content)
-                2 -> LedgerSection(s.data.income, "No income recorded", content)
-                else -> LedgerSection(s.data.cardPayments, "No card bill payments", content)
+
+                1 -> LedgerSection(
+                    s.data.expenses, "No spending recorded", content,
+                    onEdit = { txn, name, cat -> viewModel.rename(txn.id, name, cat) },
+                )
+
+                // Income is TYPED IN, never taken from an SMS: a bank credit
+                // can be a refund, a split settlement or your own money moving
+                // between accounts. Those are listed separately as "received".
+                2 -> IncomeScreen(
+                    income = s.data.income,
+                    received = s.data.received,
+                    onAdd = viewModel::addIncome,
+                    modifier = content,
+                )
+
+                else -> LedgerSection(
+                    s.data.cardPayments, "No card bill payments", content,
+                    onEdit = { txn, name, cat -> viewModel.rename(txn.id, name, cat) },
+                )
             }
         }
     }

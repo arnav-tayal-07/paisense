@@ -1,5 +1,6 @@
 package com.paisense.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,6 +18,10 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -136,7 +141,24 @@ fun LedgerSection(
     transactions: List<Transaction>,
     emptyMessage: String,
     modifier: Modifier = Modifier,
+    onEdit: ((Transaction, String, String) -> Unit)? = null,
 ) {
+    // Tapping a row opens the rename dialog. Most UPI rows arrive with only a
+    // masked account number, so naming them by hand is the only way they ever
+    // become readable.
+    var editing by remember { mutableStateOf<Transaction?>(null) }
+
+    editing?.let { txn ->
+        EditTransactionDialog(
+            txn = txn,
+            onDismiss = { editing = null },
+            onSave = { name, category ->
+                onEdit?.invoke(txn, name, category)
+                editing = null
+            },
+        )
+    }
+
     if (transactions.isEmpty()) {
         Column(
             modifier.fillMaxSize().padding(32.dp),
@@ -152,7 +174,7 @@ fun LedgerSection(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(transactions, key = { it.id }) { txn ->
-            Card(Modifier.fillMaxWidth()) {
+            Card(Modifier.fillMaxWidth().clickable(enabled = onEdit != null) { editing = txn }) {
                 Row(
                     Modifier.fillMaxWidth().padding(16.dp),
                     verticalAlignment = Alignment.CenterVertically,

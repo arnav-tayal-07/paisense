@@ -402,6 +402,10 @@ def get_transactions(
     ),
     category: str | None = None,
     merchant: str | None = Query(default=None, description="Case-insensitive partial match"),
+    source: Literal["manual", "sms", "agent"] | None = Query(
+        default=None,
+        description="Where the row came from. 'manual' is the only real income - see /summary.",
+    ),
     account_id: int | None = Query(default=None, description="Spend on one card"),
     start: datetime | None = Query(default=None, description="Inclusive lower bound on txn_time"),
     end: datetime | None = Query(default=None, description="Exclusive upper bound on txn_time"),
@@ -423,6 +427,7 @@ def get_transactions(
             txn_type=txn_type,
             category=category,
             merchant=merchant,
+            source=source,
             account_id=account_id,
             start=start,
             end=end,
