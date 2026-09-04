@@ -72,6 +72,48 @@ def resolve_account_id(
     return None
 
 
+_UNLINKED = """
+select t.id, t.account_last4, r.sender
+from transactions t
+left join raw_sms r on r.transaction_id = t.id
+where t.account_id is null and t.account_last4 is not null
+"""
+
+
+def relink_unlinked(conn: Connection) -> dict:
+    """Attach transactions that couldn't find an account when they arrived.
+
+    Registering an account does nothing retroactively on its own — a
+    transaction that failed to resolve stays unlinked and flagged forever, so
+    it never appears in that account's totals or in any card-vs-account split.
+    Run this after adding an account.
+
+    Also clears the review flag it was given, because "account ending NNNN is
+    not registered" stops being true the moment it is.
+    """
+    rows = conn.execute(_UNLINKED).fetchall()
+    linked = 0
+
+    for row in rows:
+        account_id = resolve_account_id(conn, row["sender"] or "", row["account_last4"])
+        if account_id is None:
+            continue
+
+        conn.execute(
+            "update transactions set account_id = %s where id = %s", (account_id, row["id"])
+        )
+        conn.execute(
+            """update transactions
+               set review_status = 'auto', review_reason = null
+               where id = %s and review_status = 'pending'
+                 and review_reason like 'account ending%%'""",
+            (row["id"],),
+        )
+        linked += 1
+
+    return {"examined": len(rows), "linked": linked, "still_unlinked": len(rows) - linked}
+
+
 _INSERT_ACCOUNT = """
 insert into accounts (name, kind, issuer_code, statement_day, due_days_after, due_day, credit_limit)
 values (%s, %s, %s, %s, %s, %s, %s)

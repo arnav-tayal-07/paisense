@@ -219,6 +219,57 @@ def reconcile_account(conn: Connection, account_id: int) -> dict:
     }
 
 
+_SUMMARY = """
+select
+  case
+    when t.type = 'income'       then 'income'
+    when t.type = 'card_payment' then 'card_payment'
+    when a.kind = 'credit_card'  then 'card_spend'
+    when a.kind = 'bank_account' then 'account_spend'
+    else 'unlinked'
+  end as bucket,
+  count(*) as count,
+  sum(t.amount) as total
+from transactions t
+left join accounts a on a.id = t.account_id
+where t.review_status in ('auto', 'confirmed')
+  and (%s::timestamptz is null or t.txn_time >= %s)
+  and (%s::timestamptz is null or t.txn_time <  %s)
+group by 1
+"""
+
+
+def summary(conn: Connection, start=None, end=None) -> dict:
+    """Money grouped the way it actually needs to be read.
+
+    Five buckets, and the distinctions are real rather than cosmetic:
+
+    - `income` is money in.
+    - `card_spend` is credit card purchases — money you owe but haven't paid.
+    - `account_spend` is UPI and bank debits — money already gone.
+    - `card_payment` is settling a card bill. Counting it as spending would
+      double-count every purchase it settles (ADR 016), so it stands alone.
+    - `unlinked` is spending whose account couldn't be identified. Shown
+      rather than hidden: silently dropping it would make the totals wrong
+      in a way nothing announces.
+    """
+    rows = conn.execute(_SUMMARY, (start, start, end, end)).fetchall()
+    buckets = {r["bucket"]: {"count": r["count"], "total": r["total"]} for r in rows}
+
+    for key in ("income", "card_spend", "account_spend", "card_payment", "unlinked"):
+        buckets.setdefault(key, {"count": 0, "total": 0})
+
+    spent = buckets["card_spend"]["total"] + buckets["account_spend"]["total"]
+    return {
+        "buckets": buckets,
+        # Deliberately excludes card_payment: a bill payment is not new
+        # spending, it settles purchases already counted.
+        "total_spent": spent,
+        "total_income": buckets["income"]["total"],
+        "net": buckets["income"]["total"] - spent,
+    }
+
+
 _SELECT_BY_ID = "select * from transactions where id = %s"
 
 

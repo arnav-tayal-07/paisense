@@ -17,6 +17,7 @@ from .db import get_conn
 from .serialize import out
 from .accounts import (
     add_account_number,
+    relink_unlinked,
     create_account,
     get_account,
     list_accounts,
@@ -35,6 +36,7 @@ from .transactions import (
     list_transactions,
     reconcile_account,
     set_review,
+    summary as txn_summary,
     update_transaction,
 )
 
@@ -195,6 +197,34 @@ def get_patterns():
     """
     with get_conn() as conn:
         return out(pattern_stats(conn))
+
+
+@app.get("/summary")
+def get_summary(
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
+):
+    """Money grouped the way it needs to be read.
+
+    Credit card spending is money owed but not yet paid; account spending is
+    money already gone; a card bill payment is neither, because the purchases
+    it settles were counted when they happened (ADR 016). Keeping them apart
+    is the difference between a total you can act on and one you can't.
+    """
+    with get_conn() as conn:
+        return out(txn_summary(conn, start, end))
+
+
+@app.post("/accounts/relink")
+def post_relink():
+    """Attach transactions that couldn't find an account when they arrived.
+
+    Registering an account does nothing retroactively on its own, so anything
+    that failed to resolve stays unlinked and invisible to per-account totals.
+    Run this after adding an account.
+    """
+    with get_conn() as conn:
+        return out(relink_unlinked(conn))
 
 
 @app.get("/transactions/review")
